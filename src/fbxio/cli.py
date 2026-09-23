@@ -1,5 +1,45 @@
 """Command line entry point, e.g. `fbxio dump file.fbx`."""
 
+from __future__ import annotations
 
-def main() -> None:
-    raise SystemExit("fbxio: not implemented yet")
+import argparse
+import json
+import sys
+
+from .binary import FBXParseError, read
+from .binary.dump import format_tree, to_json
+
+
+def _dump(args: argparse.Namespace) -> None:
+    fbx = read(args.file)
+    if args.json:
+        json.dump(to_json(fbx, max_depth=args.depth), sys.stdout, indent=1)
+        sys.stdout.write("\n")
+    else:
+        max_items = None if args.full else args.max_items
+        print(format_tree(fbx, max_items=max_items, max_depth=args.depth))
+
+
+def main(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(prog="fbxio", description="FBX file tools.")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    dump = sub.add_parser("dump", help="print the node tree of a binary FBX file")
+    dump.add_argument("file")
+    dump.add_argument("--json", action="store_true", help="output JSON (arrays are never truncated)")
+    dump.add_argument("-d", "--depth", type=int, default=None, help="max tree depth to print")
+    dump.add_argument("-n", "--max-items", type=int, default=8, help="array items to show (default 8)")
+    dump.add_argument("--full", action="store_true", help="show all array items")
+    dump.set_defaults(func=_dump)
+
+    args = parser.parse_args(argv)
+    try:
+        args.func(args)
+    except BrokenPipeError:  # e.g. `fbxio dump x.fbx | head`
+        sys.stderr.close()
+    except (FBXParseError, OSError) as e:
+        sys.exit(f"fbxio: {e}")
+
+
+if __name__ == "__main__":
+    main()
