@@ -141,16 +141,27 @@ class FBXDocument:
                 yield obj
 
     def children_of(self, obj: FBXObject | int, kind: str | None = None) -> list[FBXObject]:
-        """Objects connected to `obj` as children, in connection order. Use ROOT_ID for root objects."""
+        """Objects connected to `obj` as children, in connection order. Use ROOT_ID for root objects.
+
+        Each object is listed once, even if the file repeats the connection (FBX SDK files can).
+        """
         id_ = obj if isinstance(obj, int) else obj.id
-        found = (self.objects.get(c.src) for c in self.connections if c.dst == id_)
-        return [o for o in found if o is not None and (kind is None or o.kind == kind)]
+        return self._unique((c.src for c in self.connections if c.dst == id_), kind)
 
     def parents_of(self, obj: FBXObject | int, kind: str | None = None) -> list[FBXObject]:
         """Objects `obj` is connected to. The scene root (ROOT_ID) is not an object and is left out."""
         id_ = obj if isinstance(obj, int) else obj.id
-        found = (self.objects.get(c.dst) for c in self.connections if c.src == id_)
-        return [o for o in found if o is not None and (kind is None or o.kind == kind)]
+        return self._unique((c.dst for c in self.connections if c.src == id_), kind)
+
+    def _unique(self, ids: Iterator[int], kind: str | None) -> list[FBXObject]:
+        seen: set[int] = set()
+        out = []
+        for id_ in ids:
+            obj = self.objects.get(id_)
+            if obj is not None and id_ not in seen and (kind is None or obj.kind == kind):
+                seen.add(id_)
+                out.append(obj)
+        return out
 
     def template(self, kind: str) -> Properties70:
         if kind in self.templates:

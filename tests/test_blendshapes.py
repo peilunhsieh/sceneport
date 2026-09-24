@@ -178,6 +178,29 @@ def test_fbx_inbetween_with_other_vertices():
     assert shape.weight == 0.0
 
 
+def test_fbx_duplicate_connections_read_once():
+    """FBX SDK files can repeat a connection; shapes must not be read twice."""
+    doc = document_from_scene(Scene(nodes=[Node("Face", mesh=shaped_mesh())]))
+    doc.connections += [c for c in doc.connections if c.src in {o.id for o in doc.iter_objects("Deformer")}]
+    assert len(fbx_roundtrip_doc(doc).meshes[0].blend_shapes) == 2
+
+
+def test_fbx_shape_names_follow_blender():
+    """Single-target channels take the Shape geometry's name (MHR: channel shape_c_0, Shape shape_0);
+    channels with in-betweens keep the channel name."""
+    doc = document_from_scene(Scene(nodes=[Node("Face", mesh=shaped_mesh())]))
+    for i, channel in enumerate(doc.iter_objects("Deformer", "BlendShapeChannel")):
+        channel.name = f"shape_c_{i}"
+        for target in doc.children_of(channel, "Geometry"):
+            target.name = f"shape_{i}" if target.name == shaped_mesh().blend_shapes[i].name else "partial"
+    shapes = fbx_roundtrip_doc(doc).meshes[0].blend_shapes
+    assert [s.name for s in shapes] == ["shape_c_0", "shape_1"]  # "Smile.L" has an in-between
+
+
+def fbx_roundtrip_doc(doc: FBXDocument) -> Scene:
+    return scene_from_document(FBXDocument.from_file(loads(dumps(doc.to_file()))))
+
+
 # -- USD ----------------------------------------------------------------------
 
 

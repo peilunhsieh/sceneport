@@ -7,6 +7,10 @@ FBX layout (as Blender writes it):
                                     DeformPercent = weight * 100, FullWeights = [percent per shape])
                                      <-  Geometry "Shape"  (one per in-between plus the full shape;
                                             Indexes, Vertices and Normals hold offsets)
+
+When reading, a BlendShape is named after its Shape geometry if the channel has
+only one (as Blender does), else after the channel. Writing uses the same name
+for the channel and the full Shape.
 """
 
 from __future__ import annotations
@@ -69,8 +73,11 @@ def _read_channel(doc: FBXDocument, channel: FBXObject, n_vertices: int) -> Blen
     if percent is None:
         percent = channel.child_value("DeformPercent", 0.0)
     dense = len(indices) == n_vertices and np.array_equal(indices, np.arange(n_vertices))
+    # Like Blender: a single-target channel is named after its Shape geometry;
+    # with in-betweens only the channel names the shape as a whole.
+    name = targets[0].name if len(targets) == 1 else channel.name
     return BlendShape(
-        channel.name,
+        name,
         offsets[-1] if offsets[-1] is not None else zeros,
         indices=None if dense else indices,
         normal_offsets=normals[-1],
