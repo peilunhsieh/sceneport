@@ -1,11 +1,12 @@
 [project]
 name = "fbxio"
 version = "0.1.0"
-description = "Minimal FBX reader/writer in pure Python + numpy, no bpy required."
+description = "Minimal FBX reader/writer in pure Python + numpy, with trimesh conversion."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "numpy>=1.24",
+    "trimesh>=4.0",
 ]
 
 [project.scripts]

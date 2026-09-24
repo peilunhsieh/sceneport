@@ -1,6 +1,7 @@
 # fbxio
 
-Minimal FBX reader/writer in pure Python + numpy. No `bpy` required.
+Minimal FBX reader/writer in pure Python + numpy, with conversion to and from
+[trimesh](https://trimesh.org).
 
 Structure follows Blender's
 [io_scene_fbx](https://github.com/blender/blender-addons/tree/main/io_scene_fbx),
@@ -11,6 +12,41 @@ split into three layers:
 | Codec | `fbxio.binary` | Bytes ⇄ generic `FBXNode` tree (binary FBX 7.4 / 7.5) |
 | Document | `fbxio.document` | FBX structure: header, GlobalSettings, Definitions, Objects, Connections, `Properties70` |
 | Scene | `fbxio.scene` | Plain numpy data classes (Scene, Node, Mesh, BlendShape, ...) ⇄ document |
+
+## Usage
+
+```python
+import fbxio
+
+scene = fbxio.load("model.fbx")
+for node, world in scene.walk():  # world: 4x4 matrix
+    if node.mesh is not None:
+        mesh = node.mesh
+        mesh.vertices             # (N, 3)
+        mesh.face_vertex_counts   # (F,) corners per face
+        mesh.face_vertex_indices  # (C,) vertex index per corner
+        mesh.triangles()          # (T, 3) fan triangulation
+        mesh.corner_values(mesh.uvs["UVMap"])  # (C, 2) one UV per corner
+
+fbxio.save(scene, "out.fbx")
+```
+
+### trimesh
+
+```python
+from fbxio.interop.trimesh import to_trimesh, from_trimesh, to_trimesh_scene, from_trimesh_scene
+
+tm = to_trimesh(mesh)                     # triangulated; vertices split at normal/UV seams
+tm = to_trimesh(mesh, split_seams=False)  # same vertices as the FBX mesh (e.g. for blend shapes)
+tm.metadata["fbx_vertex_index"]           # trimesh vertex -> FBX vertex
+
+tscene = to_trimesh_scene(scene)          # flat: each mesh node at its world transform
+scene = from_trimesh_scene(tscene)
+mesh = from_trimesh(tm, "Name")
+```
+
+With `split_seams=False`, normals are averaged per vertex and UVs are dropped
+(with a warning) if a vertex has more than one UV.
 
 ## Inspecting files
 
@@ -55,7 +91,7 @@ must round-trip byte-exactly.
 ## Roadmap
 
 - [x] Phase 0 — binary codec, byte-exact round trip, `fbxio dump`
-- [ ] Phase 1 — static mesh (vertices, polygons, normals, UVs)
+- [x] Phase 1 — static mesh (vertices, polygons, normals, UVs), trimesh conversion
 - [ ] Phase 2 — blend shapes
 - [ ] Phase 3 — materials / textures
 - [ ] Phase 4 — skeleton / skinning
@@ -66,3 +102,7 @@ must round-trip byte-exactly.
 - Binary FBX only. Reads 7400 and 7500, writes 7400.
 - No implicit axis/unit conversion; helpers in `fbxio.math` are opt-in.
 - Geometry is stored as numpy arrays.
+- Polygons use USD-style `face_vertex_counts` + `face_vertex_indices`.
+- Per-vertex data such as normals and UVs keeps FBX's indexed form, using USD
+  interpolation names (`vertex`, `faceVarying`, `uniform`, `constant`); helpers
+  expand it to one value per corner.
