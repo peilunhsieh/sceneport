@@ -10,7 +10,7 @@ DEFAULT_FOOTER_ID = b"\xfa\xbc\xab\x09\xd0\xc8\xd4\x66\xb1\x76\xfb\x83\x1c\xf7\x
 
 
 class Prop(NamedTuple):
-    """A typed property value. `type` is an FBX type code, see `fbxio.binary.types`."""
+    """A typed property value. `type` is an FBX type code, see `sceneport.binary.types`."""
 
     type: str
     value: Any

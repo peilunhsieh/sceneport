@@ -1,4 +1,4 @@
-"""Command line entry point, e.g. `fbxio dump file.fbx`."""
+"""Command line entry point, e.g. `sceneport dump file.fbx`."""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ def _dump(args: argparse.Namespace) -> None:
 
 
 def main(argv: list[str] | None = None) -> None:
-    parser = argparse.ArgumentParser(prog="fbxio", description="FBX file tools.")
+    parser = argparse.ArgumentParser(prog="sceneport", description="3D scene file tools.")
     sub = parser.add_subparsers(dest="command", required=True)
 
     dump = sub.add_parser("dump", help="print the node tree of a binary FBX file")
@@ -35,10 +35,10 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
     try:
         args.func(args)
-    except BrokenPipeError:  # e.g. `fbxio dump x.fbx | head`
+    except BrokenPipeError:  # e.g. `sceneport dump x.fbx | head`
         sys.stderr.close()
     except (FBXParseError, OSError) as e:
-        sys.exit(f"fbxio: {e}")
+        sys.exit(f"sceneport: {e}")
 
 
 if __name__ == "__main__":

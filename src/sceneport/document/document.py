@@ -92,7 +92,7 @@ class Connection:
 @dataclass
 class FBXDocument:
     version: int = 7400
-    creator: str = f"fbxio {__version__}"
+    creator: str = f"sceneport {__version__}"
     global_settings: Properties70 = field(default_factory=default_global_settings)
     objects: dict[int, FBXObject] = field(default_factory=dict)
     connections: list[Connection] = field(default_factory=list)
@@ -210,7 +210,7 @@ class FBXDocument:
             _int("Hour", t.hour), _int("Minute", t.minute), _int("Second", t.second),
             _int("Millisecond", t.microsecond // 1000),
         ])  # fmt: skip
-        app = "fbxio"
+        app = "sceneport"
         info = Properties70()
         info.set("DocumentUrl", "KString", "/foobar.fbx", subtype="Url")
         info.set("SrcDocumentUrl", "KString", "/foobar.fbx", subtype="Url")

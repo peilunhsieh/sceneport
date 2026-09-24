@@ -3,9 +3,9 @@ import datetime as dt
 import numpy as np
 import pytest
 
-from fbxio.binary import FBXNode, Prop, dumps, loads, read
-from fbxio.document import ROOT_ID, FBXDocument, Properties70, Property
-from fbxio.document.templates import default_global_settings, default_template
+from sceneport.binary import FBXNode, Prop, dumps, loads, read
+from sceneport.document import ROOT_ID, FBXDocument, Properties70, Property
+from sceneport.document.templates import default_global_settings, default_template
 from helpers import FIXTURES, assert_nodes_equal
 
 CUBE = FIXTURES / "cube.fbx"

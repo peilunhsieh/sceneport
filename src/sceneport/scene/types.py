@@ -151,7 +151,7 @@ class Transform:
     translation: NDArray[np.float64] = _vec3(0.0)
     rotation: NDArray[np.float64] = _vec3(0.0)
     scale: NDArray[np.float64] = _vec3(1.0)
-    rotation_order: int = 0  # FBX enum, 0 = XYZ; see fbxio.math.ROTATION_ORDERS
+    rotation_order: int = 0  # FBX enum, 0 = XYZ; see sceneport.math.ROTATION_ORDERS
     pre_rotation: NDArray[np.float64] = _vec3(0.0)
     post_rotation: NDArray[np.float64] = _vec3(0.0)
     rotation_pivot: NDArray[np.float64] = _vec3(0.0)

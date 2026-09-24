@@ -2,10 +2,10 @@ import numpy as np
 import pytest
 import trimesh
 
-import fbxio
-from fbxio.interop.trimesh import VERTEX_MAP_KEY, from_trimesh, from_trimesh_scene, to_trimesh, to_trimesh_scene
-from fbxio.math import decompose_matrix, euler_matrix, scale_matrix, translation_matrix
-from fbxio.scene import Node, Scene, Transform
+import sceneport
+from sceneport.interop.trimesh import VERTEX_MAP_KEY, from_trimesh, from_trimesh_scene, to_trimesh, to_trimesh_scene
+from sceneport.math import decompose_matrix, euler_matrix, scale_matrix, translation_matrix
+from sceneport.scene import Node, Scene, Transform
 from helpers import FIXTURES, mixed_mesh
 
 CUBE = FIXTURES / "cube.fbx"
@@ -13,7 +13,7 @@ CUBE = FIXTURES / "cube.fbx"
 
 @pytest.fixture
 def cube_mesh():
-    return fbxio.load(CUBE).meshes[0]
+    return sceneport.load(CUBE).meshes[0]
 
 
 def test_cube_split_seams(cube_mesh):
@@ -64,8 +64,8 @@ def test_from_trimesh_fbx_roundtrip(tmp_path):
     assert mesh.n_faces == len(box.faces) and (mesh.face_vertex_counts == 3).all()
 
     scene = Scene(nodes=[Node("Box", mesh=mesh)])
-    fbxio.save(scene, tmp_path / "box.fbx")
-    back = to_trimesh(fbxio.load(tmp_path / "box.fbx").meshes[0], split_seams=False)
+    sceneport.save(scene, tmp_path / "box.fbx")
+    back = to_trimesh(sceneport.load(tmp_path / "box.fbx").meshes[0], split_seams=False)
     np.testing.assert_array_equal(back.vertices, box.vertices)
     np.testing.assert_array_equal(back.faces, box.faces)
     np.testing.assert_allclose(back.vertex_normals, box.vertex_normals)

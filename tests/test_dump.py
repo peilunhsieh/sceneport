@@ -4,9 +4,9 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from fbxio.binary import FBXFile, FBXNode, Prop, read
-from fbxio.binary.dump import format_prop, format_tree, to_json
-from fbxio.cli import main
+from sceneport.binary import FBXFile, FBXNode, Prop, read
+from sceneport.binary.dump import format_prop, format_tree, to_json
+from sceneport.cli import main
 
 CUBE = Path(__file__).parent / "fixtures" / "cube.fbx"
 

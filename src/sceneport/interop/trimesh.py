@@ -1,4 +1,4 @@
-"""Convert between fbxio meshes/scenes and trimesh.
+"""Convert between sceneport meshes/scenes and trimesh.
 
 trimesh stores triangles with one normal and one UV per vertex, so converting
 to it triangulates faces (fan) and, by default, splits vertices along normal

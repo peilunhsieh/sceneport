@@ -1,7 +1,7 @@
 [project]
-name = "fbxio"
+name = "sceneport"
 version = "0.1.0"
-description = "Minimal FBX reader/writer in pure Python + numpy, with trimesh conversion."
+description = "Lightweight 3D scene I/O in pure Python + numpy: native FBX read/write, trimesh conversion."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
@@ -10,7 +10,7 @@ dependencies = [
 ]
 
 [project.scripts]
-fbxio = "fbxio.cli:main"
+sceneport = "sceneport.cli:main"
 
 [dependency-groups]
 dev = [

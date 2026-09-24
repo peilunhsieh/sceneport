@@ -1,11 +1,11 @@
 import numpy as np
 import pytest
 
-import fbxio
-from fbxio.binary import FBXNode, Prop, dumps, loads
-from fbxio.document import ROOT_ID, FBXDocument
-from fbxio.math import euler_matrix
-from fbxio.scene import Mesh, Node, Primvar, Scene, Transform, document_from_scene, scene_from_document
+import sceneport
+from sceneport.binary import FBXNode, Prop, dumps, loads
+from sceneport.document import ROOT_ID, FBXDocument
+from sceneport.math import euler_matrix
+from sceneport.scene import Mesh, Node, Primvar, Scene, Transform, document_from_scene, scene_from_document
 from helpers import FIXTURES, mixed_mesh
 
 CUBE = FIXTURES / "cube.fbx"
@@ -46,7 +46,7 @@ def assert_transforms_equal(a: Transform, b: Transform) -> None:
 
 
 def test_load_cube():
-    scene = fbxio.load(CUBE)
+    scene = sceneport.load(CUBE)
     assert [n.name for n in scene.nodes] == ["Cube"]
     node = scene.nodes[0]
     mesh = node.mesh
@@ -62,7 +62,7 @@ def test_load_cube():
 
 
 def test_cube_normals_are_flat():
-    mesh = fbxio.load(CUBE).meshes[0]
+    mesh = sceneport.load(CUBE).meshes[0]
     normals = mesh.corner_values(mesh.normals).reshape(6, 4, 3)
     np.testing.assert_allclose(np.linalg.norm(normals, axis=-1), 1)
     assert (normals == normals[:, :1]).all()  # one normal per face
@@ -73,9 +73,9 @@ def test_cube_normals_are_flat():
 
 
 def test_cube_roundtrip(tmp_path):
-    scene = fbxio.load(CUBE)
-    fbxio.save(scene, tmp_path / "cube.fbx")
-    back = fbxio.load(tmp_path / "cube.fbx")
+    scene = sceneport.load(CUBE)
+    sceneport.save(scene, tmp_path / "cube.fbx")
+    back = sceneport.load(tmp_path / "cube.fbx")
     assert_meshes_equal(scene.meshes[0], back.meshes[0])
     assert_transforms_equal(scene.nodes[0].transform, back.nodes[0].transform)
     assert back.settings.get("UnitScaleFactor") == scene.settings.get("UnitScaleFactor")

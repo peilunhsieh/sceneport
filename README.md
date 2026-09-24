@@ -1,24 +1,24 @@
-# fbxio
+# sceneport
 
-Minimal FBX reader/writer in pure Python + numpy, with conversion to and from
-[trimesh](https://trimesh.org).
+Lightweight 3D scene I/O in pure Python + numpy. Reads and writes FBX natively
+and converts to and from [trimesh](https://trimesh.org).
 
-Structure follows Blender's
+The FBX support follows Blender's
 [io_scene_fbx](https://github.com/blender/blender-addons/tree/main/io_scene_fbx),
 split into three layers:
 
 | Layer | Package | Responsibility |
 |---|---|---|
-| Codec | `fbxio.binary` | Bytes ⇄ generic `FBXNode` tree (binary FBX 7.4 / 7.5) |
-| Document | `fbxio.document` | FBX structure: header, GlobalSettings, Definitions, Objects, Connections, `Properties70` |
-| Scene | `fbxio.scene` | Plain numpy data classes (Scene, Node, Mesh, BlendShape, ...) ⇄ document |
+| Codec | `sceneport.binary` | Bytes ⇄ generic `FBXNode` tree (binary FBX 7.4 / 7.5) |
+| Document | `sceneport.document` | FBX structure: header, GlobalSettings, Definitions, Objects, Connections, `Properties70` |
+| Scene | `sceneport.scene` | Plain numpy data classes (Scene, Node, Mesh, BlendShape, ...) ⇄ document |
 
 ## Usage
 
 ```python
-import fbxio
+import sceneport
 
-scene = fbxio.load("model.fbx")
+scene = sceneport.load("model.fbx")
 for node, world in scene.walk():  # world: 4x4 matrix
     if node.mesh is not None:
         mesh = node.mesh
@@ -28,13 +28,13 @@ for node, world in scene.walk():  # world: 4x4 matrix
         mesh.triangles()          # (T, 3) fan triangulation
         mesh.corner_values(mesh.uvs["UVMap"])  # (C, 2) one UV per corner
 
-fbxio.save(scene, "out.fbx")
+sceneport.save(scene, "out.fbx")
 ```
 
 ### trimesh
 
 ```python
-from fbxio.interop.trimesh import to_trimesh, from_trimesh, to_trimesh_scene, from_trimesh_scene
+from sceneport.interop.trimesh import to_trimesh, from_trimesh, to_trimesh_scene, from_trimesh_scene
 
 tm = to_trimesh(mesh)                     # triangulated; vertices split at normal/UV seams
 tm = to_trimesh(mesh, split_seams=False)  # same vertices as the FBX mesh (e.g. for blend shapes)
@@ -50,16 +50,16 @@ With `split_seams=False`, normals are averaged per vertex and UVs are dropped
 
 ## Inspecting files
 
-`fbxio dump` prints the node tree of a binary FBX file:
+`sceneport dump` prints the node tree of a binary FBX file:
 
 ```bash
-fbxio dump model.fbx               # indented tree, first 8 items of each array
-fbxio dump model.fbx -d 2          # only the top two levels
-fbxio dump model.fbx --full        # every array item
-fbxio dump model.fbx --json        # JSON, complete arrays, raw bytes as hex
+sceneport dump model.fbx               # indented tree, first 8 items of each array
+sceneport dump model.fbx -d 2          # only the top two levels
+sceneport dump model.fbx --full        # every array item
+sceneport dump model.fbx --json        # JSON, complete arrays, raw bytes as hex
 ```
 
-`python -m fbxio dump ...` works too.
+`python -m sceneport dump ...` works too.
 
 ```
 Objects
@@ -79,10 +79,10 @@ From this folder:
 uv run --group dev pytest
 ```
 
-From the root of a uv workspace that includes fbxio as a member:
+From the root of a uv workspace that includes sceneport as a member:
 
 ```bash
-uv run --package fbxio --group dev pytest path/to/fbxio/tests
+uv run --package sceneport --group dev pytest path/to/sceneport/tests
 ```
 
 Test files live in `tests/fixtures/`. `cube.fbx` was exported by Blender and
@@ -90,7 +90,7 @@ must round-trip byte-exactly.
 
 ## Roadmap
 
-- [x] Phase 0 — binary codec, byte-exact round trip, `fbxio dump`
+- [x] Phase 0 — binary codec, byte-exact round trip, `sceneport dump`
 - [x] Phase 1 — static mesh (vertices, polygons, normals, UVs), trimesh conversion
 - [ ] Phase 2 — blend shapes
 - [ ] Phase 3 — materials / textures
@@ -100,7 +100,7 @@ must round-trip byte-exactly.
 ## Conventions
 
 - Binary FBX only. Reads 7400 and 7500, writes 7400.
-- No implicit axis/unit conversion; helpers in `fbxio.math` are opt-in.
+- No implicit axis/unit conversion; helpers in `sceneport.math` are opt-in.
 - Geometry is stored as numpy arrays.
 - Polygons use USD-style `face_vertex_counts` + `face_vertex_indices`.
 - Per-vertex data such as normals and UVs keeps FBX's indexed form, using USD
