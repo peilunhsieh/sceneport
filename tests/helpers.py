@@ -3,7 +3,7 @@ from pathlib import Path
 import numpy as np
 
 from sceneport.interop.fbx.binary import FBXFile, FBXNode
-from sceneport.scene import Mesh, Primvar
+from sceneport.scene import BlendShape, Inbetween, Mesh, Primvar
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -48,3 +48,35 @@ def mixed_mesh() -> Mesh:
             "Second": Primvar(np.array([[0.0, 0.0], [1.0, 1.0]]), "faceVarying", np.array([0, 1] * 6)),
         },
     )
+
+
+def shaped_mesh() -> Mesh:
+    """mixed_mesh() with a sparse shape (in-between, weight), a dense shape (normals) and an odd name."""
+    mesh = mixed_mesh()
+    mesh.blend_shapes = [
+        BlendShape(
+            "Smile.L",
+            [[0, 0, 1], [0, 0, 2]],
+            indices=[1, 2],
+            weight=0.25,
+            inbetweens=[Inbetween(0.5, [[0, 0, 0.25], [0, 0, 0.5]])],
+        ),
+        BlendShape("Wide", np.full((8, 3), 0.5), normal_offsets=np.full((8, 3), 0.125), weight=1.0),
+    ]
+    return mesh
+
+
+def assert_blend_shapes_close(a: list[BlendShape], b: list[BlendShape], rtol: float = 0.0) -> None:
+    assert [s.name for s in a] == [s.name for s in b]
+    for sa, sb in zip(a, b):
+        np.testing.assert_allclose(sa.offsets, sb.offsets, rtol=rtol, err_msg=sa.name)
+        assert (sa.indices is None) == (sb.indices is None), sa.name
+        if sa.indices is not None:
+            np.testing.assert_array_equal(sa.indices, sb.indices)
+        assert (sa.normal_offsets is None) == (sb.normal_offsets is None), sa.name
+        if sa.normal_offsets is not None:
+            np.testing.assert_allclose(sa.normal_offsets, sb.normal_offsets, rtol=rtol)
+        assert sa.weight == sb.weight
+        assert [i.weight for i in sa.inbetweens] == [i.weight for i in sb.inbetweens]
+        for ia, ib in zip(sa.inbetweens, sb.inbetweens):
+            np.testing.assert_allclose(ia.offsets, ib.offsets, rtol=rtol)

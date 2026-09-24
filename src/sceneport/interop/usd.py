@@ -8,6 +8,11 @@ referenced. Invalid prim names are made valid, with the original kept as the
 prim's displayName. The first UV set is written as "st" (the USD convention);
 every UV primvar keeps its original name in customData.
 
+Blend shapes: a node whose mesh has blend shapes is written as a SkelRoot;
+each shape is a BlendShape prim under the Mesh (in-betweens included), bound
+with SkelBindingAPI, and a jointless Skeleton's SkelAnimation holds the
+default weights. Skeleton prims are skipped when reading.
+
 Reading: composed stages (references, payloads, instances) are read through
 usd-core. Xformable prims become Nodes; other prims (Scope, Material, ...) are
 flattened away. Transform stacks that match the one written here are read
@@ -26,10 +31,10 @@ from pathlib import Path
 
 import numpy as np
 from numpy.typing import NDArray
-from pxr import Gf, Sdf, Tf, Usd, UsdGeom, UsdUtils, Vt
+from pxr import Gf, Sdf, Tf, Usd, UsdGeom, UsdSkel, UsdUtils, Vt
 
 from ..math import ROTATION_ORDERS, decompose_matrix
-from ..scene.types import Mesh, Node, Primvar, Scene, Transform
+from ..scene.types import BlendShape, Inbetween, Mesh, Node, Primvar, Scene, Transform
 
 EXTENSIONS = (".usd", ".usda", ".usdc", ".usdz")
 NAME_KEY = "sceneport:name"  # customData key holding a primvar's original name
@@ -134,7 +139,9 @@ def _prim_name(name: str, taken: set[str]) -> str:
 
 def _write_node(stage: Usd.Stage, parent: Sdf.Path, node: Node, taken: set[str], written: dict[int, Sdf.Path]) -> Sdf.Path:
     path = parent.AppendChild(_prim_name(node.name, taken))
-    xform = UsdGeom.Xform.Define(stage, path)
+    has_shapes = node.mesh is not None and bool(node.mesh.blend_shapes)
+    # Blend shapes need a SkelRoot above the mesh.
+    xform = (UsdSkel.Root if has_shapes else UsdGeom.Xform).Define(stage, path)
     _set_display_name(xform.GetPrim(), node.name)
     _write_transform(xform, node.transform)
 
@@ -151,6 +158,8 @@ def _write_node(stage: Usd.Stage, parent: Sdf.Path, node: Node, taken: set[str],
             written[id(node.mesh)] = mesh_path
         _set_display_name(usd_mesh.GetPrim(), node.mesh.name)
         _write_geometric(usd_mesh, node.transform)
+        if has_shapes:
+            _bind_blend_shapes(stage, path.AppendChild(_prim_name("Skel", child_names)), usd_mesh, node.mesh)
 
     for child in node.children:
         _write_node(stage, path, child, child_names, written)
@@ -222,6 +231,49 @@ def _write_mesh(stage: Usd.Stage, path: Sdf.Path, mesh: Mesh) -> UsdGeom.Mesh:
     return usd_mesh
 
 
+def _shape_tokens(mesh: Mesh) -> list[str]:
+    """Valid, unique names for the mesh's blend shapes: BlendShape prim names and skel:blendShapes tokens."""
+    taken: set[str] = set()
+    return [_prim_name(shape.name, taken) for shape in mesh.blend_shapes]
+
+
+def _bind_blend_shapes(stage: Usd.Stage, skel_path: Sdf.Path, usd_mesh: UsdGeom.Mesh, mesh: Mesh) -> None:
+    """BlendShape prims under the mesh (unless referenced in), plus a jointless Skeleton whose
+    SkelAnimation carries the default weights."""
+    tokens = _shape_tokens(mesh)
+    binding = UsdSkel.BindingAPI.Apply(usd_mesh.GetPrim())
+    if not binding.GetBlendShapeTargetsRel().HasAuthoredTargets():  # not already there via a reference
+        targets = []
+        for token, shape in zip(tokens, mesh.blend_shapes):
+            usd_shape = UsdSkel.BlendShape.Define(stage, usd_mesh.GetPath().AppendChild(token))
+            _set_display_name(usd_shape.GetPrim(), shape.name)
+            usd_shape.CreateOffsetsAttr(_vec3f(shape.offsets))
+            if shape.indices is not None:
+                usd_shape.CreatePointIndicesAttr(Vt.IntArray.FromNumpy(np.ascontiguousarray(shape.indices, np.int32)))
+            if shape.normal_offsets is not None:
+                usd_shape.CreateNormalOffsetsAttr(_vec3f(shape.normal_offsets))
+            for inbetween in shape.inbetweens:
+                usd_inbetween = usd_shape.CreateInbetween(Tf.MakeValidIdentifier(f"w{inbetween.weight:g}"))
+                usd_inbetween.SetWeight(float(inbetween.weight))
+                usd_inbetween.SetOffsets(_vec3f(inbetween.offsets))
+                if inbetween.normal_offsets is not None:
+                    usd_inbetween.SetNormalOffsets(_vec3f(inbetween.normal_offsets))
+            targets.append(usd_shape.GetPath())
+        binding.CreateBlendShapesAttr(Vt.TokenArray(tokens))
+        binding.CreateBlendShapeTargetsRel().SetTargets(targets)
+
+    skeleton = UsdSkel.Skeleton.Define(stage, skel_path)
+    animation = UsdSkel.Animation.Define(stage, skel_path.AppendChild("Anim"))
+    animation.CreateBlendShapesAttr(Vt.TokenArray(tokens))
+    animation.CreateBlendShapeWeightsAttr(Vt.FloatArray([float(shape.weight) for shape in mesh.blend_shapes]))
+    UsdSkel.BindingAPI.Apply(skeleton.GetPrim()).CreateAnimationSourceRel().SetTargets([animation.GetPath()])
+    binding.CreateSkeletonRel().SetTargets([skel_path])
+
+
+def _vec3f(values) -> Vt.Vec3fArray:
+    return Vt.Vec3fArray.FromNumpy(np.ascontiguousarray(values, dtype=np.float32).reshape(-1, 3))
+
+
 def _write_primvar(api: UsdGeom.PrimvarsAPI, name: str, type_name, array_type, pv: Primvar, original: str | None = None):
     primvar = api.CreatePrimvar(name, type_name, pv.interpolation)
     primvar.Set(array_type.FromNumpy(np.ascontiguousarray(pv.values, dtype=np.float32)))
@@ -243,6 +295,8 @@ def _xformable_children(prim: Usd.Prim) -> list[Usd.Prim]:
 
 
 def _read_prim(prim: Usd.Prim, siblings: list[Node], meshes: dict[Sdf.Path, Mesh]) -> None:
+    if prim.IsA(UsdSkel.Skeleton):  # joints and skinning are not supported yet
+        return
     children = list(prim.GetFilteredChildren(_PREDICATE))
     if not prim.IsA(UsdGeom.Xformable):  # Scope, Material, ...: no transform, keep looking below
         for child in children:
@@ -337,9 +391,51 @@ def _read_mesh(prim: Usd.Prim) -> Mesh:
         uvs[name] = _read_primvar(pv, 2)
 
     mesh = Mesh(_display_name(prim), vertices, counts, indices, normals=normals, uvs=uvs)
+    mesh.blend_shapes = _read_blend_shapes(prim, len(vertices))
     if usd_mesh.GetOrientationAttr().Get(_TIME) == UsdGeom.Tokens.leftHanded:
         _flip_winding(mesh)
     return mesh
+
+
+def _read_blend_shapes(prim: Usd.Prim, n_vertices: int) -> list[BlendShape]:
+    binding = UsdSkel.BindingAPI(prim)
+    targets = binding.GetBlendShapeTargetsRel().GetTargets() if binding.GetBlendShapeTargetsRel() else []
+    if not targets:
+        return []
+    tokens = list(binding.GetBlendShapesAttr().Get() or [])
+    weights = {}
+    skeleton = binding.GetInheritedSkeleton()
+    if skeleton:
+        animation = UsdSkel.Animation(UsdSkel.BindingAPI(skeleton.GetPrim()).GetInheritedAnimationSource())
+        if animation:
+            names = animation.GetBlendShapesAttr().Get() or []
+            values = animation.GetBlendShapeWeightsAttr().Get(_TIME) or []
+            weights = dict(zip(names, values))
+
+    shapes = []
+    for token, target in zip(tokens, targets):
+        usd_shape = UsdSkel.BlendShape(prim.GetStage().GetPrimAtPath(target))
+        if not usd_shape:
+            continue
+        indices_attr = usd_shape.GetPointIndicesAttr()
+        indices = _array(indices_attr.Get(_TIME), np.int32) if indices_attr.HasAuthoredValue() else None
+        inbetweens = [
+            Inbetween(i.GetWeight(), _array(i.GetOffsets(), np.float64), _optional_vec3(i.GetNormalOffsets()))
+            for i in usd_shape.GetInbetweens()
+        ]
+        shapes.append(BlendShape(
+            usd_shape.GetPrim().GetDisplayName() or str(token),
+            _array(usd_shape.GetOffsetsAttr().Get(_TIME), np.float64),
+            indices=indices,
+            normal_offsets=_optional_vec3(usd_shape.GetNormalOffsetsAttr().Get(_TIME)),
+            weight=float(weights.get(token, 0.0)),
+            inbetweens=inbetweens,
+        ))  # fmt: skip
+    return shapes
+
+
+def _optional_vec3(values) -> NDArray | None:
+    return None if values is None or len(values) == 0 else np.array(values, dtype=np.float64)
 
 
 def _read_primvar(pv: UsdGeom.Primvar, components: int) -> Primvar:

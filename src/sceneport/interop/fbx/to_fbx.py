@@ -8,6 +8,7 @@ import numpy as np
 
 from ...scene.types import TRANSFORM_PROPERTIES, Mesh, Node, Scene, Transform
 from . import layers
+from .blendshapes import write_blend_shapes
 from .binary import write
 from .binary.node import FBXNode, Prop
 from .document import ROOT_ID, FBXDocument, FBXObject, Properties70
@@ -91,4 +92,6 @@ def _add_geometry(doc: FBXDocument, mesh: Mesh) -> FBXObject:
     if any(table):
         children += layers.write_layer_table(table)
 
-    return doc.add_object("Geometry", mesh.name, "Mesh", children=children)
+    geometry = doc.add_object("Geometry", mesh.name, "Mesh", children=children)
+    write_blend_shapes(doc, geometry, mesh)
+    return geometry

@@ -9,6 +9,7 @@ import numpy as np
 
 from ...scene.types import ROTATION_ACTIVE_FIELDS, TRANSFORM_PROPERTIES, Mesh, Node, Scene, Transform
 from . import layers
+from .blendshapes import read_blend_shapes
 from .binary import read
 from .document import FBXDocument, FBXObject
 from .settings import read_global_settings
@@ -31,7 +32,8 @@ def scene_from_document(doc: FBXDocument) -> Scene:
             if geom.subtype != "Mesh":
                 continue
             if geom.id not in meshes:
-                meshes[geom.id] = mesh_from_geometry(geom)
+                mesh = meshes[geom.id] = mesh_from_geometry(geom)
+                mesh.blend_shapes = read_blend_shapes(doc, geom, mesh.n_vertices)
             node.mesh = meshes[geom.id]
             break
 

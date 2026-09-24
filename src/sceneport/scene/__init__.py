@@ -1,5 +1,5 @@
 """Format-neutral scene model: plain numpy data classes."""
 
-from .types import AXES, Mesh, Node, Primvar, Scene, Transform
+from .types import AXES, BlendShape, Inbetween, Mesh, Node, Primvar, Scene, Transform
 
-__all__ = ["Scene", "Node", "Mesh", "Primvar", "Transform", "AXES"]
+__all__ = ["Scene", "Node", "Mesh", "Primvar", "Transform", "BlendShape", "Inbetween", "AXES"]

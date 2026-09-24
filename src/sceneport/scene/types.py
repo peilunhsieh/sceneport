@@ -39,6 +39,73 @@ class Primvar:
         return len(self.values) if self.indices is None else len(self.indices)
 
 
+def _vec3_array(value) -> NDArray[np.float64] | None:
+    return None if value is None else np.asarray(value, dtype=np.float64).reshape(-1, 3)
+
+
+@dataclass
+class Inbetween:
+    """An intermediate shape reached at `weight` (usually between 0 and 1), same vertices as its BlendShape."""
+
+    weight: float
+    offsets: NDArray[np.float64]  # (K, 3)
+    normal_offsets: NDArray[np.float64] | None = None
+
+    def __post_init__(self):
+        self.offsets = _vec3_array(self.offsets)
+        self.normal_offsets = _vec3_array(self.normal_offsets)
+
+
+@dataclass
+class BlendShape:
+    """Per-vertex position offsets (shape key / morph target).
+
+    Offsets apply to the vertices in `indices`, or to every vertex (in order) if
+    `indices` is None. At weight w the offsets are interpolated linearly through
+    (0, zero), the in-betweens, and (1, offsets); weights outside that range
+    extrapolate the nearest segment.
+    """
+
+    name: str
+    offsets: NDArray[np.float64]  # (K, 3)
+    indices: NDArray[np.int32] | None = None  # (K,) vertex indices; None = all vertices
+    normal_offsets: NDArray[np.float64] | None = None  # (K, 3)
+    weight: float = 0.0  # default weight, 1.0 = fully applied
+    inbetweens: list[Inbetween] = field(default_factory=list)
+
+    def __post_init__(self):
+        self.offsets = _vec3_array(self.offsets)
+        self.normal_offsets = _vec3_array(self.normal_offsets)
+        if self.indices is not None:
+            self.indices = np.asarray(self.indices, dtype=np.int32)
+
+    def offsets_at(self, weight: float | NDArray) -> NDArray[np.float64]:
+        """Offsets at `weight`, interpolated through the in-betweens.
+
+        A scalar weight gives (K, 3); an array of F weights gives (F, K, 3).
+        """
+        weight = np.asarray(weight, dtype=np.float64)
+        if not self.inbetweens:
+            return weight[..., None, None] * self.offsets
+        keys = [(0.0, np.zeros_like(self.offsets)), *((i.weight, i.offsets) for i in self.inbetweens), (1.0, self.offsets)]
+        keys.sort(key=lambda k: k[0])
+        key_weights = np.array([k[0] for k in keys])
+        key_offsets = np.stack([k[1] for k in keys])  # (L, K, 3)
+        # Segment containing each weight, or the first/last one to extrapolate.
+        i = np.clip(np.searchsorted(key_weights, weight) - 1, 0, len(keys) - 2)
+        t = (weight - key_weights[i]) / (key_weights[i + 1] - key_weights[i])
+        return key_offsets[i] + (key_offsets[i + 1] - key_offsets[i]) * t[..., None, None]
+
+    def dense_offsets(self, n_vertices: int, weight: float = 1.0) -> NDArray[np.float64]:
+        """(n_vertices, 3) offsets at `weight`, zero for unaffected vertices."""
+        offsets = self.offsets_at(weight)
+        if self.indices is None:
+            return offsets.copy()
+        out = np.zeros((n_vertices, 3))
+        out[self.indices] = offsets
+        return out
+
+
 @dataclass
 class Mesh:
     """Polygon mesh in USD layout: face i uses the next `face_vertex_counts[i]` entries of `face_vertex_indices`."""
@@ -49,11 +116,65 @@ class Mesh:
     face_vertex_indices: NDArray[np.int32]  # (C,), C = sum of counts = number of corners
     normals: Primvar | None = None
     uvs: dict[str, Primvar] = field(default_factory=dict)
+    blend_shapes: list[BlendShape] = field(default_factory=list)
 
     def __post_init__(self):
         self.vertices = np.asarray(self.vertices, dtype=np.float64).reshape(-1, 3)
         self.face_vertex_counts = np.asarray(self.face_vertex_counts, dtype=np.int32)
         self.face_vertex_indices = np.asarray(self.face_vertex_indices, dtype=np.int32)
+
+    def deformed_vertices(self, weights: dict[str, float] | NDArray | None = None) -> NDArray[np.float64]:
+        """Vertices with blend shapes applied.
+
+        `weights` is one of:
+          - None: every shape at its own `weight`
+          - a dict {shape name: weight}; shapes left out use their own `weight`
+          - an (S,) array, one weight per shape in `blend_shapes` order -> (N, 3)
+          - an (F, S) array, one row per frame -> (F, N, 3)
+        Weights are not clamped; in-betweens are interpolated through.
+        """
+        w = self._weight_array(weights)
+        frames = np.atleast_2d(w)
+        out = np.repeat(self.vertices[None], len(frames), axis=0)
+        for s, shape in enumerate(self.blend_shapes):
+            column = frames[:, s]
+            if column.any():
+                target = slice(None) if shape.indices is None else shape.indices
+                out[:, target] += shape.offsets_at(column)
+        return out[0] if w.ndim == 1 else out
+
+    def _weight_array(self, weights: dict[str, float] | NDArray | None) -> NDArray[np.float64]:
+        defaults = np.array([shape.weight for shape in self.blend_shapes], dtype=np.float64)
+        if weights is None:
+            return defaults
+        if isinstance(weights, dict):
+            index = {shape.name: s for s, shape in enumerate(self.blend_shapes)}
+            unknown = set(weights) - set(index)
+            if unknown:
+                raise KeyError(f"mesh {self.name!r} has no blend shapes named {sorted(unknown)}")
+            for name, value in weights.items():
+                defaults[index[name]] = value
+            return defaults
+        w = np.asarray(weights, dtype=np.float64)
+        if w.ndim not in (1, 2) or w.shape[-1] != len(self.blend_shapes):
+            raise ValueError(
+                f"weights must have shape (S,) or (F, S) with S = {len(self.blend_shapes)}, got {w.shape}"
+            )
+        return w
+
+    def blend_shape_matrix(self, dtype=np.float64) -> NDArray:
+        """(S, N, 3) dense basis: row s is blend shape s's offsets at weight 1, zero where it doesn't reach.
+
+        With it, deformed vertices are `vertices + einsum("fs,snk->fnk", weights, matrix)`.
+        Shapes with in-betweens aren't linear in their weight, so they are rejected.
+        """
+        nonlinear = [shape.name for shape in self.blend_shapes if shape.inbetweens]
+        if nonlinear:
+            raise ValueError(f"blend shapes with in-betweens have no single basis vector: {nonlinear}")
+        out = np.zeros((len(self.blend_shapes), self.n_vertices, 3), dtype=dtype)
+        for s, shape in enumerate(self.blend_shapes):
+            out[s, slice(None) if shape.indices is None else shape.indices] = shape.offsets
+        return out
 
     @property
     def n_vertices(self) -> int:
@@ -118,6 +239,23 @@ class Mesh:
             expected = self.element_count(pv.interpolation)
             if len(pv) != expected:
                 raise ValueError(f"mesh {self.name!r}: {label} has {len(pv)} {pv.interpolation} elements, expected {expected}")
+        for shape in self.blend_shapes:
+            label = f"mesh {self.name!r}: blend shape {shape.name!r}"
+            count = self.n_vertices if shape.indices is None else len(shape.indices)
+            if shape.indices is not None and len(shape.indices) and (
+                shape.indices.min() < 0 or shape.indices.max() >= self.n_vertices
+            ):
+                raise ValueError(f"{label}: vertex index out of range")
+            if shape.indices is not None and len(np.unique(shape.indices)) != len(shape.indices):
+                raise ValueError(f"{label}: duplicate vertex indices")
+            arrays = [("offsets", shape.offsets), ("normal_offsets", shape.normal_offsets)]
+            for inbetween in shape.inbetweens:
+                if inbetween.weight in (0.0, 1.0):
+                    raise ValueError(f"{label}: in-between weight must not be 0 or 1")
+                arrays += [("in-between offsets", inbetween.offsets), ("in-between normal_offsets", inbetween.normal_offsets)]
+            for what, array in arrays:
+                if array is not None and len(array) != count:
+                    raise ValueError(f"{label}: {what} has {len(array)} rows, expected {count}")
 
 
 # Transform field -> FBX Model property. Rotations, pivots and offsets are Vector3D.

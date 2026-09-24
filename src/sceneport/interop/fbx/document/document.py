@@ -116,11 +116,12 @@ class FBXDocument:
         props: Properties70 | None = None,
         children: list[FBXNode] | None = None,
         id: int | None = None,
+        cls: str | None = None,
     ) -> FBXObject:
         id_ = self.new_id() if id is None else id
         if id_ in self.objects or id_ == ROOT_ID:
             raise ValueError(f"object id {id_} already in use")
-        obj = FBXObject(kind, id_, name, subtype, props=props or Properties70(), children=children or [])
+        obj = FBXObject(kind, id_, name, subtype, cls, props or Properties70(), children or [])
         self.objects[id_] = obj
         return obj
 

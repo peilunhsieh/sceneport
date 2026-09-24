@@ -41,6 +41,12 @@ for node, world in scene.walk():  # world: 4x4 matrix
 
 scene.meters_per_unit, scene.up_axis    # e.g. 0.01, "+Y"
 
+# Blend shapes: offsets per vertex (sparse with `indices`, or dense)
+mesh.blend_shapes.append(sceneport.BlendShape("Smile", offsets, indices=vertex_ids))
+mesh.deformed_vertices({"Smile": 0.5})   # vertices with shapes applied, (N, 3)
+mesh.deformed_vertices(w)                # w: (S,) -> (N, 3), or (F, S) frames -> (F, N, 3)
+mesh.blend_shape_matrix()                # (S, N, 3) dense basis, for linear algebra
+
 sceneport.save(scene, "out.fbx")
 ```
 
@@ -77,6 +83,9 @@ scene = sceneport.load("model.usd")  # composed stage: references, payloads, ins
   name is kept as the prim's `displayName`.
 - USD only records the up axis (Y or Z). Front/right axes are implied on load
   (+Z/+X for Y up, -Y/+X for Z up). Points are stored as float32.
+- Blend shapes use UsdSkel: the node becomes a SkelRoot, each shape a
+  BlendShape prim under the Mesh, and a jointless Skeleton's SkelAnimation
+  holds the default weights.
 
 ## Inspecting files
 
@@ -123,7 +132,7 @@ must round-trip byte-exactly.
 - [x] Phase 0 — binary codec, byte-exact round trip, `sceneport dump`
 - [x] Phase 1 — static mesh (vertices, polygons, normals, UVs), trimesh conversion
 - [x] Phase 1b — USD read/write for everything in Phase 1
-- [ ] Phase 2 — blend shapes
+- [x] Phase 2 — blend shapes (with in-betweens), FBX and USD
 - [ ] Phase 3 — materials / textures
 - [ ] Phase 4 — skeleton / skinning
 - [ ] Phase 5 — animation
@@ -140,6 +149,9 @@ must round-trip byte-exactly.
 - FBX: binary only. Reads 7400 and 7500, writes 7400.
 - Geometry is stored as numpy arrays.
 - Polygons use USD-style `face_vertex_counts` + `face_vertex_indices`.
+- Blend shapes store offsets (not absolute positions), a default `weight`
+  (1 = fully applied) and optional in-betweens; weights interpolate linearly
+  through the in-betweens, as in FBX and UsdSkel.
 - Per-vertex data such as normals and UVs keeps FBX's indexed form, using USD
   interpolation names (`vertex`, `faceVarying`, `uniform`, `constant`); helpers
   expand it to one value per corner.
