@@ -1,7 +1,8 @@
 # sceneport
 
-Lightweight 3D scene I/O in pure Python + numpy. Reads and writes FBX natively
-and converts to and from [trimesh](https://trimesh.org).
+Lightweight 3D scene I/O in Python + numpy. Reads and writes FBX natively,
+USD through [OpenUSD](https://openusd.org) (`usd-core`), and converts to and
+from [trimesh](https://trimesh.org).
 
 At the center is a format-neutral scene model; each file format or library is
 a converter around it:
@@ -10,6 +11,7 @@ a converter around it:
 |---|---|
 | `sceneport.scene` | Plain numpy data classes: Scene, Node, Mesh, Primvar, Transform |
 | `sceneport.interop.fbx` | Native FBX read/write |
+| `sceneport.interop.usd` | USD read/write (`.usd`, `.usda`, `.usdc`, `.usdz`) via usd-core |
 | `sceneport.interop.trimesh` | Conversion to and from trimesh |
 
 The FBX support follows Blender's
@@ -59,6 +61,23 @@ mesh = from_trimesh(tm, "Name")
 With `split_seams=False`, normals are averaged per vertex and UVs are dropped
 (with a warning) if a vertex has more than one UV.
 
+### USD
+
+```python
+sceneport.save(scene, "model.usda")   # also .usd, .usdc, .usdz
+scene = sceneport.load("model.usd")  # composed stage: references, payloads, instances
+```
+
+- One Xform prim per node, with a Mesh prim child (`subdivisionScheme = "none"`).
+- Transforms become an xformOp stack that matches `Transform` exactly (pivots
+  and pre/post rotation included); other stacks are read via the local matrix.
+- The first UV set is written as `st`; original UV set names are kept in
+  customData and restored on load.
+- Invalid prim names are made valid (`Cube.001` -> `Cube_001`); the original
+  name is kept as the prim's `displayName`.
+- USD only records the up axis (Y or Z). Front/right axes are implied on load
+  (+Z/+X for Y up, -Y/+X for Z up). Points are stored as float32.
+
 ## Inspecting files
 
 `sceneport dump` prints the node tree of a binary FBX file:
@@ -103,6 +122,7 @@ must round-trip byte-exactly.
 
 - [x] Phase 0 — binary codec, byte-exact round trip, `sceneport dump`
 - [x] Phase 1 — static mesh (vertices, polygons, normals, UVs), trimesh conversion
+- [x] Phase 1b — USD read/write for everything in Phase 1
 - [ ] Phase 2 — blend shapes
 - [ ] Phase 3 — materials / textures
 - [ ] Phase 4 — skeleton / skinning
@@ -110,7 +130,8 @@ must round-trip byte-exactly.
 
 ## Conventions
 
-- `load`/`save` pick the format from the file extension (`.fbx` for now).
+- `load`/`save` pick the format from the file extension (`.fbx`, `.usd`, `.usda`,
+  `.usdc`, `.usdz`).
 - `Scene.meters_per_unit` and `up_axis`/`front_axis`/`right_axis` (signed names
   like `"+Y"`) describe the data; nothing is converted on load or save. New
   scenes default to meters, Y up.

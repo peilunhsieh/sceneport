@@ -1,4 +1,4 @@
-"""Lightweight 3D scene I/O in pure Python + numpy."""
+"""Lightweight 3D scene I/O in Python + numpy."""
 
 __version__ = "0.1.0"
 
@@ -9,9 +9,9 @@ from .scene import AXES, Mesh, Node, Primvar, Scene, Transform  # noqa: E402
 
 
 def _formats():
-    from .interop import fbx
+    from .interop import fbx, usd
 
-    return {".fbx": fbx}
+    return {".fbx": fbx, **{ext: usd for ext in usd.EXTENSIONS}}
 
 
 def load(path: str | os.PathLike) -> Scene:
