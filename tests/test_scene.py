@@ -2,10 +2,11 @@ import numpy as np
 import pytest
 
 import sceneport
-from sceneport.binary import FBXNode, Prop, dumps, loads
-from sceneport.document import ROOT_ID, FBXDocument
+from sceneport.interop.fbx.binary import FBXNode, Prop, dumps, loads
+from sceneport.interop.fbx.document import ROOT_ID, FBXDocument
 from sceneport.math import euler_matrix
-from sceneport.scene import Mesh, Node, Primvar, Scene, Transform, document_from_scene, scene_from_document
+from sceneport.interop.fbx import document_from_scene, scene_from_document
+from sceneport.scene import Mesh, Node, Primvar, Scene, Transform
 from helpers import FIXTURES, mixed_mesh
 
 CUBE = FIXTURES / "cube.fbx"
@@ -58,7 +59,8 @@ def test_load_cube():
     np.testing.assert_allclose(node.transform.rotation, [-90, 0, 0], atol=1e-4)
     np.testing.assert_array_equal(node.transform.scale, [100, 100, 100])
     np.testing.assert_array_equal(node.transform.translation, [0, 0, 0])  # template default
-    assert scene.unit_scale == 1.0 and scene.up_axis == (1, 1)
+    assert scene.meters_per_unit == 0.01
+    assert (scene.up_axis, scene.front_axis, scene.right_axis) == ("+Y", "+Z", "+X")
 
 
 def test_cube_normals_are_flat():
@@ -78,7 +80,7 @@ def test_cube_roundtrip(tmp_path):
     back = sceneport.load(tmp_path / "cube.fbx")
     assert_meshes_equal(scene.meshes[0], back.meshes[0])
     assert_transforms_equal(scene.nodes[0].transform, back.nodes[0].transform)
-    assert back.settings.get("UnitScaleFactor") == scene.settings.get("UnitScaleFactor")
+    assert back.meters_per_unit == scene.meters_per_unit
 
 
 # -- mesh ---------------------------------------------------------------------

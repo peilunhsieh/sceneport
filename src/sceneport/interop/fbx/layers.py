@@ -15,9 +15,9 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from ..binary.node import FBXNode, Prop
-from ..document.document import FBXObject
-from .types import Primvar
+from .binary.node import FBXNode, Prop
+from .document.document import FBXObject
+from ...scene.types import Primvar
 
 MAPPING_TO_INTERPOLATION = {
     "ByVertice": "vertex",

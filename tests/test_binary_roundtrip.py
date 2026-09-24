@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from sceneport.binary import FBXFile, FBXNode, FBXParseError, Prop, dumps, loads
+from sceneport.interop.fbx.binary import FBXFile, FBXNode, FBXParseError, Prop, dumps, loads
 from helpers import FIXTURES, assert_files_equal
 
 

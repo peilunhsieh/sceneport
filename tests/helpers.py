@@ -2,7 +2,7 @@ from pathlib import Path
 
 import numpy as np
 
-from sceneport.binary import FBXFile, FBXNode
+from sceneport.interop.fbx.binary import FBXFile, FBXNode
 from sceneport.scene import Mesh, Primvar
 
 FIXTURES = Path(__file__).parent / "fixtures"

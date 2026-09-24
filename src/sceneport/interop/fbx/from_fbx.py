@@ -7,10 +7,11 @@ import warnings
 
 import numpy as np
 
-from ..binary import read
-from ..document import FBXDocument, FBXObject
+from ...scene.types import ROTATION_ACTIVE_FIELDS, TRANSFORM_PROPERTIES, Mesh, Node, Scene, Transform
 from . import layers
-from .types import ROTATION_ACTIVE_FIELDS, TRANSFORM_PROPERTIES, Mesh, Node, Scene, Transform
+from .binary import read
+from .document import FBXDocument, FBXObject
+from .settings import read_global_settings
 
 
 def load(path: str | os.PathLike) -> Scene:
@@ -18,7 +19,8 @@ def load(path: str | os.PathLike) -> Scene:
 
 
 def scene_from_document(doc: FBXDocument) -> Scene:
-    scene = Scene(settings=doc.global_settings.copy())
+    scene = Scene()
+    read_global_settings(doc.global_settings, scene)
     meshes: dict[int, Mesh] = {}  # geometry id -> Mesh, so shared geometry stays shared
     nodes: dict[int, Node] = {}
 

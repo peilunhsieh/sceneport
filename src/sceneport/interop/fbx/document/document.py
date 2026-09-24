@@ -6,7 +6,7 @@ import datetime as dt
 from dataclasses import dataclass, field
 from typing import Any, Iterator
 
-from .. import __version__
+from .... import __version__
 from ..binary.node import DEFAULT_FOOTER_ID, FBXFile, FBXNode, Prop
 from .properties import Properties70
 from .templates import default_global_settings, default_template

@@ -6,8 +6,8 @@ import argparse
 import json
 import sys
 
-from .binary import FBXParseError, read
-from .binary.dump import format_tree, to_json
+from .interop.fbx.binary import FBXParseError, read
+from .interop.fbx.binary.dump import format_tree, to_json
 
 
 def _dump(args: argparse.Namespace) -> None:

@@ -1,10 +1,5 @@
-"""Layer 3: plain numpy scene model and its conversion to/from FBXDocument."""
+"""Format-neutral scene model: plain numpy data classes."""
 
-from .from_fbx import load, scene_from_document
-from .to_fbx import document_from_scene, save
-from .types import Mesh, Node, Primvar, Scene, Transform
+from .types import AXES, Mesh, Node, Primvar, Scene, Transform
 
-__all__ = [
-    "Scene", "Node", "Mesh", "Primvar", "Transform",
-    "load", "save", "scene_from_document", "document_from_scene",
-]  # fmt: skip
+__all__ = ["Scene", "Node", "Mesh", "Primvar", "Transform", "AXES"]

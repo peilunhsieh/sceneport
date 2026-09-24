@@ -2,8 +2,8 @@
 
 trimesh stores triangles with one normal and one UV per vertex, so converting
 to it triangulates faces (fan) and, by default, splits vertices along normal
-and UV seams. `metadata["fbx_vertex_index"]` maps each trimesh vertex back to
-the FBX vertex it came from.
+and UV seams. `metadata["source_vertex_index"]` maps each trimesh vertex back to
+the Mesh vertex it came from.
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from numpy.typing import NDArray
 from ..math import decompose_matrix
 from ..scene.types import Mesh, Node, Primvar, Scene, Transform
 
-VERTEX_MAP_KEY = "fbx_vertex_index"
+VERTEX_MAP_KEY = "source_vertex_index"
 
 
 def to_trimesh(mesh: Mesh, *, split_seams: bool = True, uv_set: str | None = None) -> trimesh.Trimesh:

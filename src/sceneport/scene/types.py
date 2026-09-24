@@ -3,16 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Iterator, Literal
+from typing import Any, Iterator, Literal
 
 import numpy as np
 from numpy.typing import NDArray
 
-from ..document.properties import Properties70
-from ..document.templates import default_global_settings
 from ..math import euler_matrix, scale_matrix, translation_matrix
 
-# USD primvar interpolation names; see scene/layers.py for the FBX mapping modes.
+# USD primvar interpolation names; see interop/fbx/layers.py for the FBX mapping modes.
 Interpolation = Literal["vertex", "faceVarying", "uniform", "constant"]
 
 
@@ -207,11 +205,30 @@ class Node:
         return child
 
 
+AXES = ("+X", "-X", "+Y", "-Y", "+Z", "-Z")
+
+
 @dataclass
 class Scene:
+    """Root nodes plus the coordinate system the data is expressed in.
+
+    Units and axes describe the data; nothing is converted on load or save.
+    Axes are signed names such as "+Y", with FBX's meaning of up, front and
+    right (FBX UpAxis, FrontAxis and CoordAxis).
+    """
+
     nodes: list[Node] = field(default_factory=list)  # root nodes
-    # FBX GlobalSettings (axes, units, frame rate), stored as in the file.
-    settings: Properties70 = field(default_factory=default_global_settings)
+    meters_per_unit: float = 1.0
+    up_axis: str = "+Y"
+    front_axis: str = "+Z"
+    right_axis: str = "+X"
+    # Format-specific data kept for round trips, keyed by format, e.g. extras["fbx"].
+    extras: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self):
+        for name in ("up_axis", "front_axis", "right_axis"):
+            if getattr(self, name) not in AXES:
+                raise ValueError(f"{name} must be one of {AXES}, got {getattr(self, name)!r}")
 
     def add(self, node: Node) -> Node:
         self.nodes.append(node)
@@ -237,21 +254,3 @@ class Scene:
             if node.mesh is not None:
                 seen.setdefault(id(node.mesh), node.mesh)
         return list(seen.values())
-
-    @property
-    def unit_scale(self) -> float:
-        """Centimeters per file unit (UnitScaleFactor): 1.0 = cm, 100.0 = m."""
-        return self.settings.get("UnitScaleFactor", 1.0)
-
-    @property
-    def up_axis(self) -> tuple[int, int]:
-        """(axis, sign), axis 0/1/2 = X/Y/Z."""
-        return self.settings.get("UpAxis", 1), self.settings.get("UpAxisSign", 1)
-
-    @property
-    def front_axis(self) -> tuple[int, int]:
-        return self.settings.get("FrontAxis", 2), self.settings.get("FrontAxisSign", 1)
-
-    @property
-    def coord_axis(self) -> tuple[int, int]:
-        return self.settings.get("CoordAxis", 0), self.settings.get("CoordAxisSign", 1)

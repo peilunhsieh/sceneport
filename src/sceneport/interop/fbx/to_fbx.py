@@ -6,11 +6,12 @@ import os
 
 import numpy as np
 
-from ..binary import write
-from ..binary.node import FBXNode, Prop
-from ..document import ROOT_ID, FBXDocument, FBXObject, Properties70
+from ...scene.types import TRANSFORM_PROPERTIES, Mesh, Node, Scene, Transform
 from . import layers
-from .types import TRANSFORM_PROPERTIES, Mesh, Node, Scene, Transform
+from .binary import write
+from .binary.node import FBXNode, Prop
+from .document import ROOT_ID, FBXDocument, FBXObject, Properties70
+from .settings import write_global_settings
 
 
 def save(scene: Scene, path: str | os.PathLike, *, version: int = 7400) -> None:
@@ -18,7 +19,7 @@ def save(scene: Scene, path: str | os.PathLike, *, version: int = 7400) -> None:
 
 
 def document_from_scene(scene: Scene, *, version: int = 7400) -> FBXDocument:
-    doc = FBXDocument(version=version, global_settings=scene.settings.copy())
+    doc = FBXDocument(version=version, global_settings=write_global_settings(scene))
     geometries: dict[int, FBXObject] = {}  # id(Mesh) -> Geometry, so shared meshes are written once
 
     def add(node: Node, parent_id: int) -> None:
