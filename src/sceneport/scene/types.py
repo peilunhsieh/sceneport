@@ -117,6 +117,7 @@ class Mesh:
     normals: Primvar | None = None
     uvs: dict[str, Primvar] = field(default_factory=dict)
     blend_shapes: list[BlendShape] = field(default_factory=list)
+    skin: Skin | None = None
 
     def __post_init__(self):
         self.vertices = np.asarray(self.vertices, dtype=np.float64).reshape(-1, 3)
@@ -161,6 +162,40 @@ class Mesh:
                 f"weights must have shape (S,) or (F, S) with S = {len(self.blend_shapes)}, got {w.shape}"
             )
         return w
+
+    def skinned_vertices(
+        self, joint_world: NDArray, weights: dict[str, float] | NDArray | None = None
+    ) -> NDArray[np.float64]:
+        """World-space vertices: blend shapes (see `deformed_vertices`), then linear blend skinning.
+
+        `joint_world` holds the world matrices of `skin.joints`, (J, 4, 4) for one pose
+        or (F, J, 4, 4) for F frames; `Skin.joint_world(scene)` gives the current pose.
+        Blend shape `weights` may also have a frame axis. Returns (N, 3) or (F, N, 3).
+        """
+        if self.skin is None:
+            raise ValueError(f"mesh {self.name!r} has no skin")
+        skin = self.skin
+        joint_world = np.asarray(joint_world, dtype=np.float64)
+        if joint_world.shape[-3:] != (len(skin.joints), 4, 4) or joint_world.ndim not in (3, 4):
+            raise ValueError(f"joint_world must be (J, 4, 4) or (F, J, 4, 4) with J = {len(skin.joints)}, got {joint_world.shape}")
+        base = self.deformed_vertices(weights)
+        single = joint_world.ndim == 3 and base.ndim == 2
+
+        matrices = joint_world if joint_world.ndim == 4 else joint_world[None]
+        matrices = matrices @ skin.inverse_bind @ skin.geom_bind  # (F or 1, J, 4, 4)
+        points = base if base.ndim == 3 else base[None]  # (F or 1, N, 3)
+        frames = max(len(matrices), len(points))
+        if len(matrices) not in (1, frames) or len(points) not in (1, frames):
+            raise ValueError(f"frame counts differ: {len(matrices)} joint poses, {len(points)} blend shape rows")
+        matrices = np.broadcast_to(matrices, (frames,) + matrices.shape[1:])
+        homogeneous = np.concatenate([points, np.ones(points.shape[:-1] + (1,))], axis=-1)
+        homogeneous = np.broadcast_to(homogeneous, (frames,) + homogeneous.shape[1:])  # (F, N, 4)
+
+        out = np.zeros((frames, self.n_vertices, 3))
+        for k in range(skin.joint_indices.shape[1]):  # one influence slot at a time keeps memory at (F, N, 3, 4)
+            per_vertex = matrices[:, skin.joint_indices[:, k], :3, :]
+            out += skin.joint_weights[None, :, k, None] * np.einsum("fnij,fnj->fni", per_vertex, homogeneous)
+        return out[0] if single else out
 
     def blend_shape_matrix(self, dtype=np.float64) -> NDArray:
         """(S, N, 3) dense basis: row s is blend shape s's offsets at weight 1, zero where it doesn't reach.
@@ -256,6 +291,17 @@ class Mesh:
             for what, array in arrays:
                 if array is not None and len(array) != count:
                     raise ValueError(f"{label}: {what} has {len(array)} rows, expected {count}")
+        if self.skin is not None:
+            skin, label = self.skin, f"mesh {self.name!r}: skin"
+            if skin.joint_indices.shape != skin.joint_weights.shape or len(skin.joint_indices) != self.n_vertices:
+                raise ValueError(
+                    f"{label}: joint_indices {skin.joint_indices.shape} and joint_weights {skin.joint_weights.shape} "
+                    f"must both be (N, K) with N = {self.n_vertices}"
+                )
+            if skin.joint_indices.size and (skin.joint_indices.min() < 0 or skin.joint_indices.max() >= len(skin.joints)):
+                raise ValueError(f"{label}: joint index out of range")
+            if skin.inverse_bind.shape != (len(skin.joints), 4, 4):
+                raise ValueError(f"{label}: inverse_bind must be (J, 4, 4) with J = {len(skin.joints)}")
 
 
 # Transform field -> FBX Model property. Rotations, pivots and offsets are Vector3D.
@@ -329,18 +375,70 @@ class Transform:
         )
 
 
-@dataclass
+@dataclass(eq=False)
 class Node:
-    """A scene node (FBX Model). Several nodes may share one Mesh (instancing)."""
+    """A scene node (FBX Model). Several nodes may share one Mesh (instancing).
+
+    Joints are ordinary nodes with `joint=True`; other nodes (props, helpers) can be
+    their children. Nodes compare by identity, so they can be used as dict keys.
+    """
 
     name: str
     transform: Transform = field(default_factory=Transform)
     mesh: Mesh | None = None
     children: list[Node] = field(default_factory=list)
+    joint: bool = False
+    # Format-specific data kept for round trips, keyed by format, e.g. extras["fbx"].
+    extras: dict[str, Any] = field(default_factory=dict)
 
     def add(self, child: Node) -> Node:
         self.children.append(child)
         return child
+
+
+@dataclass
+class Skin:
+    """Linear blend skinning of a mesh to joint Nodes (the glTF layout).
+
+    `joint_indices` / `joint_weights` are (N, K): each vertex's K influences, as
+    indices into `joints` and their weights (zero weight = unused slot).
+    `inverse_bind[j]` is the inverse of joints[j]'s world matrix at bind time and
+    `geom_bind` the mesh's world matrix at bind time. A vertex v skins to world as
+
+        sum_k  w_k * joint_world[j_k] @ inverse_bind[j_k] @ geom_bind @ v
+    """
+
+    joints: list[Node]
+    joint_indices: NDArray[np.int32]  # (N, K)
+    joint_weights: NDArray[np.float64]  # (N, K)
+    inverse_bind: NDArray[np.float64]  # (J, 4, 4)
+    geom_bind: NDArray[np.float64] = field(default_factory=lambda: np.eye(4))
+
+    def __post_init__(self):
+        self.joint_indices = np.asarray(self.joint_indices, dtype=np.int32)
+        self.joint_weights = np.asarray(self.joint_weights, dtype=np.float64)
+        if self.joint_indices.ndim == 1:  # one influence per vertex
+            self.joint_indices = self.joint_indices[:, None]
+        if self.joint_weights.ndim == 1:
+            self.joint_weights = self.joint_weights[:, None]
+        self.inverse_bind = np.asarray(self.inverse_bind, dtype=np.float64).reshape(-1, 4, 4)
+        self.geom_bind = np.asarray(self.geom_bind, dtype=np.float64).reshape(4, 4)
+
+    def joint_world(self, scene: Scene) -> NDArray[np.float64]:
+        """(J, 4, 4) current world matrices of `joints`, from the node transforms in `scene`."""
+        world = scene.world_matrices()
+        return np.stack([world[joint] for joint in self.joints])
+
+    def bind_world(self) -> NDArray[np.float64]:
+        """(J, 4, 4) world matrices of `joints` at bind time."""
+        return np.linalg.inv(self.inverse_bind)
+
+    def dense_weights(self) -> NDArray[np.float64]:
+        """(N, J) weight of every joint on every vertex (the SMPL-style layout)."""
+        out = np.zeros((len(self.joint_indices), len(self.joints)))
+        rows = np.repeat(np.arange(len(self.joint_indices)), self.joint_indices.shape[1])
+        np.add.at(out, (rows, self.joint_indices.ravel()), self.joint_weights.ravel())
+        return out
 
 
 AXES = ("+X", "-X", "+Y", "-Y", "+Z", "-Z")
@@ -380,6 +478,20 @@ class Scene:
             world = parent @ node.transform.matrix()
             yield node, world
             stack.extend((c, world) for c in reversed(node.children))
+
+    def world_matrices(self) -> dict[Node, NDArray[np.float64]]:
+        """World matrix of every node, keyed by node."""
+        return dict(self.walk())
+
+    def parents(self) -> dict[Node, Node | None]:
+        """Parent of every node (None for root nodes)."""
+        out: dict[Node, Node | None] = {}
+        stack = [(n, None) for n in self.nodes]
+        while stack:
+            node, parent = stack.pop()
+            out[node] = parent
+            stack.extend((c, node) for c in node.children)
+        return out
 
     def find(self, name: str) -> Node | None:
         return next((n for n, _ in self.walk() if n.name == name), None)

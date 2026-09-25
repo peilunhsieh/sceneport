@@ -13,6 +13,7 @@ from .blendshapes import read_blend_shapes
 from .binary import read
 from .document import FBXDocument, FBXObject
 from .settings import read_global_settings
+from .skin import JOINT_SUBTYPES, read_skin
 
 
 def load(path: str | os.PathLike) -> Scene:
@@ -27,7 +28,9 @@ def scene_from_document(doc: FBXDocument) -> Scene:
 
     models = list(doc.iter_objects("Model"))
     for model in models:
-        node = nodes[model.id] = Node(model.name, _read_transform(doc, model))
+        node = nodes[model.id] = Node(model.name, _read_transform(doc, model), joint=model.subtype in JOINT_SUBTYPES)
+        if node.joint and model.subtype != "LimbNode":
+            node.extras["fbx"] = {"subtype": model.subtype}  # e.g. "Root"; LimbNode is the default on write
         for geom in doc.children_of(model, "Geometry"):
             if geom.subtype != "Mesh":
                 continue
@@ -43,6 +46,10 @@ def scene_from_document(doc: FBXDocument) -> Scene:
             nodes[parents[0].id].children.append(nodes[model.id])
         else:
             scene.nodes.append(nodes[model.id])
+
+    # Skins last: their joints can be anywhere in the hierarchy.
+    for geom_id, mesh in meshes.items():
+        mesh.skin = read_skin(doc, doc.objects[geom_id], mesh.n_vertices, nodes)
     return scene
 
 

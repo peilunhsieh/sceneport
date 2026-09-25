@@ -8,18 +8,28 @@ referenced. Invalid prim names are made valid, with the original kept as the
 prim's displayName. The first UV set is written as "st" (the USD convention);
 every UV primvar keeps its original name in customData.
 
-Blend shapes: a node whose mesh has blend shapes is written as a SkelRoot;
-each shape is a BlendShape prim under the Mesh (in-betweens included), bound
-with SkelBindingAPI, and a jointless Skeleton's SkelAnimation holds the
-default weights. Skeleton prims are skipped when reading.
+Blend shapes: each shape is a BlendShape prim under the Mesh (in-betweens
+included), bound with SkelBindingAPI. The default weights live in a
+SkelAnimation: on the mesh's skeleton if it is skinned, else on a jointless
+Skeleton under a SkelRoot made from the mesh's node.
+
+Skeletons: USD joints are not prims. Each tree of joint Nodes becomes a Skeleton
+prim (named after its root joint, where that joint would be), with joints listed
+parents first, original names in jointNames, local rest and world bind matrices.
+Non-joint children of joints (attachments) are written under the Skeleton prim:
+their first xformOp places them at their joint's rest pose and customData names
+the joint, so they are re-attached on load. A skinned mesh binds with skel:joints
+(its own joint order), jointIndices/jointWeights and geomBindTransform. Mesh and
+Skeleton need a common SkelRoot: their nearest shared ancestor, or a generated
+wrapper (tagged in customData and dropped again on load).
 
 Reading: composed stages (references, payloads, instances) are read through
 usd-core. Xformable prims become Nodes; other prims (Scope, Material, ...) are
 flattened away. Transform stacks that match the one written here are read
-exactly; others are decomposed from the local matrix.
+exactly; others (and joint rest matrices) are decomposed from matrices.
 
 USD only records the up axis (Y or Z); front and right axes are implied
-(+Z/+X for Y up, -Y/+X for Z up). Points are stored as float32.
+(+Z/+X for Y up, -Y/+X for Z up). Points and weights are stored as float32.
 """
 
 from __future__ import annotations
@@ -27,6 +37,7 @@ from __future__ import annotations
 import os
 import tempfile
 import warnings
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
@@ -34,10 +45,13 @@ from numpy.typing import NDArray
 from pxr import Gf, Sdf, Tf, Usd, UsdGeom, UsdSkel, UsdUtils, Vt
 
 from ..math import ROTATION_ORDERS, decompose_matrix
-from ..scene.types import BlendShape, Inbetween, Mesh, Node, Primvar, Scene, Transform
+from ..scene.types import BlendShape, Inbetween, Mesh, Node, Primvar, Scene, Skin, Transform
 
 EXTENSIONS = (".usd", ".usda", ".usdc", ".usdz")
-NAME_KEY = "sceneport:name"  # customData key holding a primvar's original name
+NAME_KEY = "sceneport:name"  # customData: a primvar's original name
+JOINT_KEY = "sceneport:joint"  # customData: joint token an attachment hangs from
+GENERATED_KEY = "sceneport:generated"  # customData: SkelRoot added only to satisfy UsdSkel
+JOINT_OP = "sceneportJoint"  # xformOp suffix placing an attachment at its joint
 IMPLIED_AXES = {"+Y": ("+Z", "+X"), "+Z": ("-Y", "+X")}  # up -> (front, right)
 
 _TIME = Usd.TimeCode.EarliestTime()
@@ -101,12 +115,7 @@ def stage_from_scene(scene: Scene) -> Usd.Stage:
     stage = Usd.Stage.CreateInMemory()
     UsdGeom.SetStageMetersPerUnit(stage, scene.meters_per_unit)
     UsdGeom.SetStageUpAxis(stage, UsdGeom.Tokens.y if scene.up_axis == "+Y" else UsdGeom.Tokens.z)
-
-    written: dict[int, Sdf.Path] = {}  # id(Mesh) -> path of its Mesh prim
-    taken: set[str] = set()
-    root_paths = [_write_node(stage, Sdf.Path.absoluteRootPath, node, taken, written) for node in scene.nodes]
-    if root_paths:
-        stage.SetDefaultPrim(stage.GetPrimAtPath(root_paths[0]))
+    _Writer(stage, scene).write()
     return stage
 
 
@@ -114,9 +123,7 @@ def scene_from_stage(stage: Usd.Stage) -> Scene:
     up = "+" + UsdGeom.GetStageUpAxis(stage)
     front, right = IMPLIED_AXES[up]
     scene = Scene(meters_per_unit=UsdGeom.GetStageMetersPerUnit(stage), up_axis=up, front_axis=front, right_axis=right)
-    meshes: dict[Sdf.Path, Mesh] = {}
-    for prim in stage.GetPseudoRoot().GetFilteredChildren(_PREDICATE):
-        _read_prim(prim, scene.nodes, meshes)
+    _Reader().read(stage, scene)
     return scene
 
 
@@ -137,33 +144,209 @@ def _prim_name(name: str, taken: set[str]) -> str:
     return candidate
 
 
-def _write_node(stage: Usd.Stage, parent: Sdf.Path, node: Node, taken: set[str], written: dict[int, Sdf.Path]) -> Sdf.Path:
-    path = parent.AppendChild(_prim_name(node.name, taken))
-    has_shapes = node.mesh is not None and bool(node.mesh.blend_shapes)
-    # Blend shapes need a SkelRoot above the mesh.
-    xform = (UsdSkel.Root if has_shapes else UsdGeom.Xform).Define(stage, path)
-    _set_display_name(xform.GetPrim(), node.name)
-    _write_transform(xform, node.transform)
+@dataclass(eq=False)
+class _SkeletonPlan:
+    """One Skeleton prim: a set of joint trees sharing a parent node."""
 
-    child_names: set[str] = set()
-    if node.mesh is not None:
-        mesh_path = path.AppendChild(_prim_name(node.mesh.name, child_names))
-        if id(node.mesh) in written:
-            prim = stage.DefinePrim(mesh_path)
-            prim.GetReferences().AddInternalReference(written[id(node.mesh)])
+    roots: list[Node]
+    parent: Node | None
+    joints: list[Node] = field(default_factory=list)  # parents first
+    tokens: dict[Node, str] = field(default_factory=dict)  # joint -> USD joint path
+    skel_space: dict[Node, NDArray] = field(default_factory=dict)  # joint -> rest matrix relative to the Skeleton
+    path: Sdf.Path | None = None
+    shape_weights: dict[str, float] = field(default_factory=dict)  # blend shape token -> default weight
+
+    def build(self) -> None:
+        self.joints, self.tokens, self.skel_space = [], {}, {}
+        root_names: set[str] = set()
+        stack = [(root, None, np.eye(4), root_names) for root in reversed(self.roots)]
+        while stack:
+            joint, parent, parent_matrix, taken = stack.pop()
+            name = _prim_name(joint.name, taken)
+            self.tokens[joint] = name if parent is None else f"{self.tokens[parent]}/{name}"
+            self.skel_space[joint] = parent_matrix @ joint.transform.matrix()
+            self.joints.append(joint)
+            child_names: set[str] = set()
+            for child in reversed([c for c in joint.children if c.joint]):
+                stack.append((child, joint, self.skel_space[joint], child_names))
+
+
+class _Writer:
+    def __init__(self, stage: Usd.Stage, scene: Scene):
+        self.stage = stage
+        self.scene = scene
+        self.parents = scene.parents()
+        self.world = scene.world_matrices()
+        self.written: dict[int, Sdf.Path] = {}  # id(Mesh) -> path of its Mesh prim
+        self.plans: dict[Node, _SkeletonPlan] = {}  # root joint -> plan
+        self.skel_roots: set[Node] = set()  # nodes written as SkelRoot
+        self.wrapped: list[Node] = []  # root nodes placed under a generated SkelRoot
+        self.bindings: list[tuple[UsdGeom.Mesh, Mesh, _SkeletonPlan]] = []
+        self._plan()
+
+    # planning
+
+    def _root_joint(self, joint: Node) -> Node:
+        while (parent := self.parents.get(joint)) is not None and parent.joint:
+            joint = parent
+        return joint
+
+    def _ancestors(self, node: Node | None) -> list[Node]:
+        chain = []
+        while node is not None:
+            chain.append(node)
+            node = self.parents[node]
+        return chain[::-1]
+
+    def _plan(self) -> None:
+        for node in self.parents:
+            if node.joint and not (self.parents[node] is not None and self.parents[node].joint):
+                self.plans[node] = _SkeletonPlan([node], self.parents[node])
+        # A skin spanning several joint trees puts them in one Skeleton.
+        for node in self.parents:
+            if node.mesh is None or node.mesh.skin is None:
+                continue
+            roots = list(dict.fromkeys(self._root_joint(j) for j in node.mesh.skin.joints))
+            if any(not r.joint or r not in self.parents for r in roots):
+                raise ValueError(f"mesh {node.mesh.name!r}: skin joints must be joint nodes in the scene")
+            plans = list(dict.fromkeys(self.plans[r] for r in roots))
+            if len({p.parent for p in plans}) > 1:
+                raise ValueError(f"mesh {node.mesh.name!r}: skin joints must share one parent node")
+            if len(plans) > 1:
+                merged = _SkeletonPlan([r for p in plans for r in p.roots], plans[0].parent)
+                for r in merged.roots:
+                    self.plans[r] = merged
+        for plan in set(self.plans.values()):
+            plan.build()
+        # Skinned meshes and their skeletons need a common SkelRoot.
+        for node in self.parents:
+            if node.mesh is None or node.mesh.skin is None:
+                continue
+            plan = self.plans[self._root_joint(node.mesh.skin.joints[0])]
+            mesh_chain, skel_chain = self._ancestors(node), self._ancestors(plan.parent)
+            common = [a for a, b in zip(mesh_chain, skel_chain) if a is b]
+            if common:
+                self.skel_roots.add(common[-1])
+            else:
+                for root in (mesh_chain[0], skel_chain[0] if skel_chain else plan.roots[0]):
+                    if root not in self.wrapped:
+                        self.wrapped.append(root)
+
+    # writing
+
+    def write(self) -> None:
+        taken: set[str] = set()
+        root_paths = []
+        wrapper: tuple[Sdf.Path, set[str]] | None = None
+        for node in self.scene.nodes:
+            if node in self.wrapped:
+                if wrapper is None:
+                    path = Sdf.Path.absoluteRootPath.AppendChild(_prim_name("SkelRoot", taken))
+                    UsdSkel.Root.Define(self.stage, path).GetPrim().SetCustomDataByKey(GENERATED_KEY, True)
+                    wrapper = (path, set())
+                    root_paths.append(path)
+                self._write_node(wrapper[0], node, wrapper[1])
+            elif (path := self._write_node(Sdf.Path.absoluteRootPath, node, taken)) is not None:
+                root_paths.append(path)
+        if root_paths:
+            self.stage.SetDefaultPrim(self.stage.GetPrimAtPath(root_paths[0]))
+        self._finish()
+
+    def _write_node(
+        self, parent: Sdf.Path, node: Node, taken: set[str], joint: tuple[str, NDArray] | None = None
+    ) -> Sdf.Path | None:
+        if node.joint:
+            plan = self.plans.get(node)
+            if plan is not None and plan.path is None:
+                self._write_skeleton(parent, plan, taken)
+            return plan.path if plan is not None else None
+
+        path = parent.AppendChild(_prim_name(node.name, taken))
+        mesh = node.mesh
+        own_skeleton = mesh is not None and bool(mesh.blend_shapes) and mesh.skin is None
+        prim_type = UsdSkel.Root if own_skeleton or node in self.skel_roots else UsdGeom.Xform
+        xform = prim_type.Define(self.stage, path)
+        _set_display_name(xform.GetPrim(), node.name)
+        if joint is not None:  # attachment of a joint: start at the joint's rest pose
+            token, matrix = joint
+            xform.AddTransformOp(precision=_DOUBLE, opSuffix=JOINT_OP).Set(Gf.Matrix4d(matrix.T.tolist()))
+            xform.GetPrim().SetCustomDataByKey(JOINT_KEY, token)
+        _write_transform(xform, node.transform)
+
+        child_names: set[str] = set()
+        if mesh is not None:
+            usd_mesh = self._write_mesh_prim(path.AppendChild(_prim_name(mesh.name, child_names)), mesh)
+            _write_geometric(usd_mesh, node.transform)
+            tokens = _write_blend_shape_targets(self.stage, usd_mesh, mesh) if mesh.blend_shapes else []
+            if mesh.skin is not None:
+                plan = self.plans[self._root_joint(mesh.skin.joints[0])]
+                plan.shape_weights.update(zip(tokens, (float(s.weight) for s in mesh.blend_shapes)))
+                self.bindings.append((usd_mesh, mesh, plan))
+            elif own_skeleton:
+                skel_path = path.AppendChild(_prim_name("Skel", child_names))
+                UsdSkel.Skeleton.Define(self.stage, skel_path)
+                _write_animation(self.stage, skel_path, dict(zip(tokens, (float(s.weight) for s in mesh.blend_shapes))))
+                UsdSkel.BindingAPI.Apply(usd_mesh.GetPrim()).CreateSkeletonRel().SetTargets([skel_path])
+
+        for child in node.children:
+            self._write_node(path, child, child_names)
+        return path
+
+    def _write_mesh_prim(self, path: Sdf.Path, mesh: Mesh) -> UsdGeom.Mesh:
+        if id(mesh) in self.written:
+            prim = self.stage.DefinePrim(path)
+            prim.GetReferences().AddInternalReference(self.written[id(mesh)])
             usd_mesh = UsdGeom.Mesh(prim)
             usd_mesh.ClearXformOpOrder()
         else:
-            usd_mesh = _write_mesh(stage, mesh_path, node.mesh)
-            written[id(node.mesh)] = mesh_path
-        _set_display_name(usd_mesh.GetPrim(), node.mesh.name)
-        _write_geometric(usd_mesh, node.transform)
-        if has_shapes:
-            _bind_blend_shapes(stage, path.AppendChild(_prim_name("Skel", child_names)), usd_mesh, node.mesh)
+            usd_mesh = _write_mesh(self.stage, path, mesh)
+            self.written[id(mesh)] = path
+        _set_display_name(usd_mesh.GetPrim(), mesh.name)
+        return usd_mesh
 
-    for child in node.children:
-        _write_node(stage, path, child, child_names, written)
-    return path
+    def _write_skeleton(self, parent: Sdf.Path, plan: _SkeletonPlan, taken: set[str]) -> None:
+        plan.path = parent.AppendChild(_prim_name(plan.roots[0].name, taken))
+        skeleton = UsdSkel.Skeleton.Define(self.stage, plan.path)
+        bind = {joint: self.world[joint] for joint in plan.joints}
+        for node in self.parents:  # prefer the skins' bind matrices over the current pose
+            skin = node.mesh.skin if node.mesh is not None else None
+            if skin is not None:
+                bind.update((j, m) for j, m in zip(skin.joints, skin.bind_world()) if j in bind)
+        skeleton.CreateJointsAttr(Vt.TokenArray([plan.tokens[j] for j in plan.joints]))
+        skeleton.CreateJointNamesAttr(Vt.TokenArray([j.name for j in plan.joints]))
+        skeleton.CreateRestTransformsAttr(_matrix_array([j.transform.matrix() for j in plan.joints]))
+        skeleton.CreateBindTransformsAttr(_matrix_array([bind[j] for j in plan.joints]))
+
+        child_names: set[str] = set()
+        for joint in plan.joints:
+            if joint.mesh is not None:
+                warnings.warn(f"joint {joint.name!r} has a mesh; USD joints can't carry geometry, so it is dropped")
+            for child in joint.children:
+                if not child.joint:
+                    self._write_node(plan.path, child, child_names, (plan.tokens[joint], plan.skel_space[joint]))
+
+    def _finish(self) -> None:
+        for usd_mesh, mesh, plan in self.bindings:
+            skin = mesh.skin
+            binding = UsdSkel.BindingAPI.Apply(usd_mesh.GetPrim())
+            binding.CreateSkeletonRel().SetTargets([plan.path])
+            if binding.GetJointIndicesAttr().HasAuthoredValue():  # a referenced copy: already bound
+                continue
+            k = skin.joint_indices.shape[1]
+            binding.CreateJointsAttr(Vt.TokenArray([plan.tokens[j] for j in skin.joints]))
+            binding.CreateJointIndicesPrimvar(False, k).Set(Vt.IntArray.FromNumpy(np.ascontiguousarray(skin.joint_indices.ravel())))
+            weights = np.ascontiguousarray(skin.joint_weights.ravel(), dtype=np.float32)
+            binding.CreateJointWeightsPrimvar(False, k).Set(Vt.FloatArray.FromNumpy(weights))
+            binding.CreateGeomBindTransformAttr(Gf.Matrix4d(skin.geom_bind.T.tolist()))
+        for plan in set(self.plans.values()):
+            if plan.shape_weights:
+                _write_animation(self.stage, plan.path, plan.shape_weights)
+
+
+def _matrix_array(matrices) -> Vt.Matrix4dArray:
+    """Column-vector 4x4 matrices -> USD's row-vector Matrix4dArray."""
+    stacked = np.asarray(matrices, dtype=np.float64).reshape(-1, 4, 4)
+    return Vt.Matrix4dArray.FromNumpy(np.ascontiguousarray(stacked.transpose(0, 2, 1)))
 
 
 def _set_display_name(prim: Usd.Prim, name: str) -> None:
@@ -237,37 +420,40 @@ def _shape_tokens(mesh: Mesh) -> list[str]:
     return [_prim_name(shape.name, taken) for shape in mesh.blend_shapes]
 
 
-def _bind_blend_shapes(stage: Usd.Stage, skel_path: Sdf.Path, usd_mesh: UsdGeom.Mesh, mesh: Mesh) -> None:
-    """BlendShape prims under the mesh (unless referenced in), plus a jointless Skeleton whose
-    SkelAnimation carries the default weights."""
+def _write_blend_shape_targets(stage: Usd.Stage, usd_mesh: UsdGeom.Mesh, mesh: Mesh) -> list[str]:
+    """BlendShape prims under the mesh, bound to it (unless already there via a reference). Returns the tokens."""
     tokens = _shape_tokens(mesh)
     binding = UsdSkel.BindingAPI.Apply(usd_mesh.GetPrim())
-    if not binding.GetBlendShapeTargetsRel().HasAuthoredTargets():  # not already there via a reference
-        targets = []
-        for token, shape in zip(tokens, mesh.blend_shapes):
-            usd_shape = UsdSkel.BlendShape.Define(stage, usd_mesh.GetPath().AppendChild(token))
-            _set_display_name(usd_shape.GetPrim(), shape.name)
-            usd_shape.CreateOffsetsAttr(_vec3f(shape.offsets))
-            if shape.indices is not None:
-                usd_shape.CreatePointIndicesAttr(Vt.IntArray.FromNumpy(np.ascontiguousarray(shape.indices, np.int32)))
-            if shape.normal_offsets is not None:
-                usd_shape.CreateNormalOffsetsAttr(_vec3f(shape.normal_offsets))
-            for inbetween in shape.inbetweens:
-                usd_inbetween = usd_shape.CreateInbetween(Tf.MakeValidIdentifier(f"w{inbetween.weight:g}"))
-                usd_inbetween.SetWeight(float(inbetween.weight))
-                usd_inbetween.SetOffsets(_vec3f(inbetween.offsets))
-                if inbetween.normal_offsets is not None:
-                    usd_inbetween.SetNormalOffsets(_vec3f(inbetween.normal_offsets))
-            targets.append(usd_shape.GetPath())
-        binding.CreateBlendShapesAttr(Vt.TokenArray(tokens))
-        binding.CreateBlendShapeTargetsRel().SetTargets(targets)
+    if binding.GetBlendShapeTargetsRel().HasAuthoredTargets():
+        return tokens
+    targets = []
+    for token, shape in zip(tokens, mesh.blend_shapes):
+        usd_shape = UsdSkel.BlendShape.Define(stage, usd_mesh.GetPath().AppendChild(token))
+        _set_display_name(usd_shape.GetPrim(), shape.name)
+        usd_shape.CreateOffsetsAttr(_vec3f(shape.offsets))
+        if shape.indices is not None:
+            usd_shape.CreatePointIndicesAttr(Vt.IntArray.FromNumpy(np.ascontiguousarray(shape.indices, np.int32)))
+        if shape.normal_offsets is not None:
+            usd_shape.CreateNormalOffsetsAttr(_vec3f(shape.normal_offsets))
+        for inbetween in shape.inbetweens:
+            usd_inbetween = usd_shape.CreateInbetween(Tf.MakeValidIdentifier(f"w{inbetween.weight:g}"))
+            usd_inbetween.SetWeight(float(inbetween.weight))
+            usd_inbetween.SetOffsets(_vec3f(inbetween.offsets))
+            if inbetween.normal_offsets is not None:
+                usd_inbetween.SetNormalOffsets(_vec3f(inbetween.normal_offsets))
+        targets.append(usd_shape.GetPath())
+    binding.CreateBlendShapesAttr(Vt.TokenArray(tokens))
+    binding.CreateBlendShapeTargetsRel().SetTargets(targets)
+    return tokens
 
-    skeleton = UsdSkel.Skeleton.Define(stage, skel_path)
+
+def _write_animation(stage: Usd.Stage, skel_path: Sdf.Path, weights: dict[str, float]) -> None:
+    """A SkelAnimation under the Skeleton holding default blend shape weights."""
     animation = UsdSkel.Animation.Define(stage, skel_path.AppendChild("Anim"))
-    animation.CreateBlendShapesAttr(Vt.TokenArray(tokens))
-    animation.CreateBlendShapeWeightsAttr(Vt.FloatArray([float(shape.weight) for shape in mesh.blend_shapes]))
-    UsdSkel.BindingAPI.Apply(skeleton.GetPrim()).CreateAnimationSourceRel().SetTargets([animation.GetPath()])
-    binding.CreateSkeletonRel().SetTargets([skel_path])
+    animation.CreateBlendShapesAttr(Vt.TokenArray(list(weights)))
+    animation.CreateBlendShapeWeightsAttr(Vt.FloatArray(list(weights.values())))
+    skeleton = stage.GetPrimAtPath(skel_path)
+    UsdSkel.BindingAPI.Apply(skeleton).CreateAnimationSourceRel().SetTargets([animation.GetPath()])
 
 
 def _vec3f(values) -> Vt.Vec3fArray:
@@ -286,6 +472,134 @@ def _write_primvar(api: UsdGeom.PrimvarsAPI, name: str, type_name, array_type, p
 # -- reading --------------------------------------------------------------------
 
 
+class _Reader:
+    def __init__(self):
+        self.meshes: dict[Sdf.Path, Mesh] = {}
+        # Skeleton path -> (joint token -> Node, joint token -> world bind matrix)
+        self.skeletons: dict[Sdf.Path, tuple[dict[str, Node], dict[str, NDArray]]] = {}
+        self.pending_skins: list[tuple[Mesh, Usd.Prim]] = []
+
+    def read(self, stage: Usd.Stage, scene: Scene) -> None:
+        for prim in stage.GetPseudoRoot().GetFilteredChildren(_PREDICATE):
+            self.read_prim(prim, scene.nodes)
+        for mesh, prim in self.pending_skins:  # after all skeletons are known
+            mesh.skin = self.read_skin(prim, mesh)
+
+    def read_prim(self, prim: Usd.Prim, siblings: list[Node]) -> None:
+        if prim.IsA(UsdSkel.Skeleton):
+            self.read_skeleton(prim, siblings)
+            return
+        children = list(prim.GetFilteredChildren(_PREDICATE))
+        generated = prim.IsA(UsdSkel.Root) and prim.GetCustomDataByKey(GENERATED_KEY)
+        if generated or not prim.IsA(UsdGeom.Xformable):  # Scope, Material, ...: no transform, keep looking below
+            for child in children:
+                self.read_prim(child, siblings)
+            return
+
+        node = Node(_display_name(prim), _read_transform(UsdGeom.Xformable(prim)))
+        siblings.append(node)
+        if prim.IsA(UsdGeom.Mesh):
+            node.mesh = self.get_mesh(prim)
+        else:
+            # A leaf Mesh child is the node's own geometry, with its transform as the geometric transform.
+            for child in children:
+                if child.IsA(UsdGeom.Mesh) and not _xformable_children(child):
+                    node.mesh = self.get_mesh(child)
+                    _set_geometric(node.transform, _read_transform(UsdGeom.Xformable(child)))
+                    children.remove(child)
+                    break
+        for child in children:
+            self.read_prim(child, node.children)
+
+    def read_skeleton(self, prim: Usd.Prim, siblings: list[Node]) -> None:
+        skeleton = UsdSkel.Skeleton(prim)
+        tokens = [str(t) for t in skeleton.GetJointsAttr().Get() or []]
+        names_attr = skeleton.GetJointNamesAttr()
+        names = [str(n) for n in names_attr.Get()] if names_attr.HasAuthoredValue() else []
+        if len(names) != len(tokens):
+            names = [Sdf.Path(t).name for t in tokens]
+        rest = _matrices(skeleton.GetRestTransformsAttr().Get())
+        bind = _matrices(skeleton.GetBindTransformsAttr().Get())
+
+        own = _read_transform(UsdGeom.Xformable(prim))
+        target = siblings
+        if tokens and not np.allclose(own.matrix(), np.eye(4)):  # keep a transformed Skeleton as a node
+            holder = Node(_display_name(prim), own)
+            siblings.append(holder)
+            target = holder.children
+
+        by_token: dict[str, Node] = {}
+        bind_by_token: dict[str, NDArray] = {}
+        for i, (token, name) in enumerate(zip(tokens, names)):
+            parent = by_token.get(str(Sdf.Path(token).GetParentPath()))
+            if rest is not None and len(rest) == len(tokens):
+                local = rest[i]
+            elif bind is not None:
+                local = bind[i] if parent is None else np.linalg.inv(bind_by_token[_parent_token(token)]) @ bind[i]
+            else:
+                local = np.eye(4)
+            joint = Node(name, Transform(*decompose_matrix(local)), joint=True)
+            (parent.children if parent is not None else target).append(joint)
+            by_token[token] = joint
+            if bind is not None and len(bind) == len(tokens):
+                bind_by_token[token] = bind[i]
+        self.skeletons[prim.GetPath()] = (by_token, bind_by_token)
+
+        for child in prim.GetFilteredChildren(_PREDICATE):
+            token = child.GetCustomDataByKey(JOINT_KEY)
+            if token in by_token:
+                self.read_prim(child, by_token[token].children)
+            elif child.IsA(UsdGeom.Xformable):
+                self.read_prim(child, target)
+
+    def get_mesh(self, prim: Usd.Prim) -> Mesh:
+        """Mesh for `prim`, shared with the mesh it internally references if that was read already."""
+        refs = prim.GetMetadata("references")
+        if refs is not None:
+            for ref in refs.GetAddedOrExplicitItems():
+                if not ref.assetPath and ref.primPath in self.meshes:
+                    return self.meshes[ref.primPath]
+        mesh = self.meshes[prim.GetPath()] = _read_mesh(prim)
+        if UsdSkel.BindingAPI(prim).GetJointIndicesAttr().HasAuthoredValue():
+            self.pending_skins.append((mesh, prim))
+        return mesh
+
+    def read_skin(self, prim: Usd.Prim, mesh: Mesh) -> Skin | None:
+        binding = UsdSkel.BindingAPI(prim)
+        skeleton = binding.GetInheritedSkeleton()
+        if not skeleton or skeleton.GetPath() not in self.skeletons:
+            warnings.warn(f"{prim.GetPath()}: skinned to an unknown skeleton; skin skipped")
+            return None
+        by_token, bind_by_token = self.skeletons[skeleton.GetPath()]
+        joints_attr = binding.GetJointsAttr()
+        order = [str(t) for t in (joints_attr.Get() if joints_attr.HasAuthoredValue() else skeleton.GetJointsAttr().Get())]
+        missing = [t for t in order if t not in by_token or t not in bind_by_token]
+        if missing:
+            warnings.warn(f"{prim.GetPath()}: joints {missing[:3]} missing from the skeleton or its bind pose; skin skipped")
+            return None
+
+        index_primvar, weight_primvar = binding.GetJointIndicesPrimvar(), binding.GetJointWeightsPrimvar()
+        k = max(index_primvar.GetElementSize(), 1)
+        joint_indices = _array(index_primvar.Get(_TIME), np.int32).reshape(-1, k)
+        joint_weights = _array(weight_primvar.Get(_TIME), np.float64).reshape(-1, k)
+        if index_primvar.GetInterpolation() == UsdGeom.Tokens.constant:  # rigid: one set for all points
+            joint_indices = np.repeat(joint_indices[:1], mesh.n_vertices, axis=0)
+            joint_weights = np.repeat(joint_weights[:1], mesh.n_vertices, axis=0)
+        geom_attr = binding.GetGeomBindTransformAttr()
+        geom_bind = np.array(geom_attr.Get()).T if geom_attr.HasAuthoredValue() else np.eye(4)
+        inverse_bind = np.linalg.inv(np.stack([bind_by_token[t] for t in order]))
+        return Skin([by_token[t] for t in order], joint_indices, joint_weights, inverse_bind, geom_bind)
+
+
+def _parent_token(token: str) -> str:
+    return str(Sdf.Path(token).GetParentPath())
+
+
+def _matrices(value) -> NDArray | None:
+    """USD row-vector Matrix4dArray -> (J, 4, 4) column-vector matrices."""
+    return None if value is None or len(value) == 0 else np.array(value, dtype=np.float64).transpose(0, 2, 1)
+
+
 def _display_name(prim: Usd.Prim) -> str:
     return prim.GetDisplayName() or prim.GetName()
 
@@ -294,33 +608,11 @@ def _xformable_children(prim: Usd.Prim) -> list[Usd.Prim]:
     return [c for c in prim.GetFilteredChildren(_PREDICATE) if c.IsA(UsdGeom.Xformable)]
 
 
-def _read_prim(prim: Usd.Prim, siblings: list[Node], meshes: dict[Sdf.Path, Mesh]) -> None:
-    if prim.IsA(UsdSkel.Skeleton):  # joints and skinning are not supported yet
-        return
-    children = list(prim.GetFilteredChildren(_PREDICATE))
-    if not prim.IsA(UsdGeom.Xformable):  # Scope, Material, ...: no transform, keep looking below
-        for child in children:
-            _read_prim(child, siblings, meshes)
-        return
-
-    node = Node(_display_name(prim), _read_transform(UsdGeom.Xformable(prim)))
-    siblings.append(node)
-    if prim.IsA(UsdGeom.Mesh):
-        node.mesh = _get_mesh(prim, meshes)
-    else:
-        # A leaf Mesh child is the node's own geometry, with its transform as the geometric transform.
-        for child in children:
-            if child.IsA(UsdGeom.Mesh) and not _xformable_children(child):
-                node.mesh = _get_mesh(child, meshes)
-                _set_geometric(node.transform, _read_transform(UsdGeom.Xformable(child)))
-                children.remove(child)
-                break
-    for child in children:
-        _read_prim(child, node.children, meshes)
-
-
 def _read_transform(xf: UsdGeom.Xformable) -> Transform:
-    ops = xf.GetOrderedXformOps()
+    ops = list(xf.GetOrderedXformOps())
+    joint_matrix = None
+    if ops and ops[0].GetOpName() == f"xformOp:transform:{JOINT_OP}":  # attachment: drop the joint placement
+        joint_matrix = np.array(ops.pop(0).GetOpTransform(_TIME)).T
     values: dict = {}
     positions = []
     for op in ops:
@@ -333,9 +625,9 @@ def _read_transform(xf: UsdGeom.Xformable) -> Transform:
             positions = None
             break
         positions.append(_OP_INDEX[name])
-        field = _OP_STACK[_OP_INDEX[name]][1]
-        if field is not None:
-            values[field] = np.asarray(op.GetAttr().Get(_TIME), dtype=np.float64)
+        field_name = _OP_STACK[_OP_INDEX[name]][1]
+        if field_name is not None:
+            values[field_name] = np.asarray(op.GetAttr().Get(_TIME), dtype=np.float64)
     names = {op.GetOpName() for op in ops}
     pivots_paired = all(
         (f"xformOp:translate:{p}" in names) == (f"!invert!xformOp:translate:{p}" in names)
@@ -344,6 +636,8 @@ def _read_transform(xf: UsdGeom.Xformable) -> Transform:
     if positions is not None and positions == sorted(set(positions)) and pivots_paired:
         return Transform(**values)
     matrix = np.array(xf.GetLocalTransformation(_TIME)).T  # USD matrices are row-vector
+    if joint_matrix is not None:
+        matrix = np.linalg.inv(joint_matrix) @ matrix
     translation, rotation, scale = decompose_matrix(matrix)
     return Transform(translation=translation, rotation=rotation, scale=scale)
 
@@ -355,17 +649,6 @@ def _set_geometric(target: Transform, local: Transform) -> None:
     target.geometric_translation = simple.translation
     target.geometric_rotation = simple.rotation
     target.geometric_scale = simple.scale
-
-
-def _get_mesh(prim: Usd.Prim, meshes: dict[Sdf.Path, Mesh]) -> Mesh:
-    """Mesh for `prim`, shared with the mesh it internally references if that was read already."""
-    refs = prim.GetMetadata("references")
-    if refs is not None:
-        for ref in refs.GetAddedOrExplicitItems():
-            if not ref.assetPath and ref.primPath in meshes:
-                return meshes[ref.primPath]
-    mesh = meshes[prim.GetPath()] = _read_mesh(prim)
-    return mesh
 
 
 def _read_mesh(prim: Usd.Prim) -> Mesh:

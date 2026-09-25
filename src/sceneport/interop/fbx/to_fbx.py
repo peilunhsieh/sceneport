@@ -13,6 +13,7 @@ from .binary import write
 from .binary.node import FBXNode, Prop
 from .document import ROOT_ID, FBXDocument, FBXObject, Properties70
 from .settings import write_global_settings
+from .skin import write_bind_pose, write_skin
 
 
 def save(scene: Scene, path: str | os.PathLike, *, version: int = 7400) -> None:
@@ -22,9 +23,12 @@ def save(scene: Scene, path: str | os.PathLike, *, version: int = 7400) -> None:
 def document_from_scene(scene: Scene, *, version: int = 7400) -> FBXDocument:
     doc = FBXDocument(version=version, global_settings=write_global_settings(scene))
     geometries: dict[int, FBXObject] = {}  # id(Mesh) -> Geometry, so shared meshes are written once
+    first_users: dict[int, tuple[Mesh, FBXObject]] = {}  # id(Mesh) -> (mesh, first Model using it)
+    models: dict[Node, FBXObject] = {}
 
     def add(node: Node, parent_id: int) -> None:
-        model = doc.add_object("Model", node.name, "Mesh" if node.mesh is not None else "Null")
+        model = doc.add_object("Model", node.name, _model_subtype(node))
+        models[node] = model
         model.props = _transform_props(node.transform)
         model.props.set("InheritType", "enum", 1)
         if node.mesh is not None:
@@ -38,18 +42,41 @@ def document_from_scene(scene: Scene, *, version: int = 7400) -> FBXDocument:
         ]
         model.props_index = 1  # after Version, as Blender writes it
         doc.connect(model, parent_id)
+        if node.joint:
+            attribute = doc.add_object("NodeAttribute", node.name, model.subtype, cls="NodeAttribute", children=[
+                FBXNode("TypeFlags", [Prop("S", "Skeleton")]),
+            ])  # fmt: skip
+            attribute.props_index = -1
+            doc.connect(attribute, model)
 
         if node.mesh is not None:
             key = id(node.mesh)
             if key not in geometries:
                 geometries[key] = _add_geometry(doc, node.mesh)
+                first_users[key] = (node.mesh, model)
             doc.connect(geometries[key], model)
         for child in node.children:
             add(child, model.id)
 
     for root in scene.nodes:
         add(root, ROOT_ID)
+
+    # Skins last, once every joint has a Model.
+    for key, (mesh, mesh_model) in first_users.items():
+        if mesh.skin is None:
+            continue
+        write_skin(doc, geometries[key], mesh, models)
+        bind_world = mesh.skin.bind_world()
+        entries = [(mesh_model, mesh.skin.geom_bind)]
+        entries += [(models[joint], bind_world[j]) for j, joint in enumerate(mesh.skin.joints)]
+        write_bind_pose(doc, mesh.name, entries)
     return doc
+
+
+def _model_subtype(node: Node) -> str:
+    if node.joint:
+        return node.extras.get("fbx", {}).get("subtype", "LimbNode")
+    return "Mesh" if node.mesh is not None else "Null"
 
 
 def _transform_props(t: Transform) -> Properties70:

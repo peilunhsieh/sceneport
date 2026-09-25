@@ -33,7 +33,8 @@ class FBXObject:
     cls: str | None = None  # class after the name separator; None means same as `kind`
     props: Properties70 = field(default_factory=Properties70)
     children: list[FBXNode] = field(default_factory=list)  # other child nodes, e.g. Vertices
-    props_index: int = 0  # where Properties70 sits among `children` when written
+    # Where Properties70 sits among `children` when written; -1 = leave it out while empty.
+    props_index: int = 0
 
     def child(self, name: str) -> FBXNode | None:
         return next((c for c in self.children if c.name == name), None)
@@ -49,7 +50,7 @@ class FBXObject:
         id_ = values[0]
         name, sep, class_ = values[1].partition(NAME_SEP) if len(values) > 1 else ("", "", "")
         subtype = values[2] if len(values) > 2 else ""
-        children, props, props_index = [], Properties70(), 0
+        children, props, props_index = [], Properties70(), -1
         for child in node.children:
             if child.name == "Properties70":
                 props, props_index = Properties70.from_node(child), len(children)
@@ -60,7 +61,8 @@ class FBXObject:
     def to_node(self) -> FBXNode:
         full_name = f"{self.name}{NAME_SEP}{self.cls or self.kind}"
         children = list(self.children)
-        children.insert(min(self.props_index, len(children)), self.props.to_node())
+        if self.props_index >= 0 or len(self.props):
+            children.insert(min(max(self.props_index, 0), len(children)), self.props.to_node())
         return FBXNode(self.kind, [Prop("L", self.id), Prop("S", full_name), Prop("S", self.subtype)], children)
 
 

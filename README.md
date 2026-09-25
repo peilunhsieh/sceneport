@@ -47,6 +47,12 @@ mesh.deformed_vertices({"Smile": 0.5})   # vertices with shapes applied, (N, 3)
 mesh.deformed_vertices(w)                # w: (S,) -> (N, 3), or (F, S) frames -> (F, N, 3)
 mesh.blend_shape_matrix()                # (S, N, 3) dense basis, for linear algebra
 
+# Skinning: joints are Nodes with joint=True; a Skin binds the mesh to them
+skin = mesh.skin                         # joints, joint_indices/joint_weights (N, K), inverse_bind (J, 4, 4)
+scene.find("l_lowleg").transform.rotation += [0, 0, 60]
+mesh.skinned_vertices(skin.joint_world(scene))  # world-space (N, 3); (F, J, 4, 4) poses -> (F, N, 3)
+skin.dense_weights()                     # (N, J) weights, SMPL-style
+
 sceneport.save(scene, "out.fbx")
 ```
 
@@ -86,6 +92,11 @@ scene = sceneport.load("model.usd")  # composed stage: references, payloads, ins
 - Blend shapes use UsdSkel: the node becomes a SkelRoot, each shape a
   BlendShape prim under the Mesh, and a jointless Skeleton's SkelAnimation
   holds the default weights.
+- Skeletons use UsdSkel: each joint tree becomes a Skeleton prim (joint paths,
+  original names in `jointNames`, rest and bind matrices). Non-joint children of
+  joints are written under the Skeleton, placed at their joint's rest pose, and
+  re-attached on load. When a skinned mesh and its skeleton share no ancestor,
+  a SkelRoot is generated around them and dropped again on load.
 
 ## Inspecting files
 
@@ -134,7 +145,7 @@ must round-trip byte-exactly.
 - [x] Phase 1b — USD read/write for everything in Phase 1
 - [x] Phase 2 — blend shapes (with in-betweens), FBX and USD
 - [ ] Phase 3 — materials / textures
-- [ ] Phase 4 — skeleton / skinning
+- [x] Phase 4 — skeleton / skinning (linear blend skinning), FBX and USD
 - [ ] Phase 5 — animation
 
 ## Conventions
@@ -149,6 +160,9 @@ must round-trip byte-exactly.
 - FBX: binary only. Reads 7400 and 7500, writes 7400.
 - Geometry is stored as numpy arrays.
 - Polygons use USD-style `face_vertex_counts` + `face_vertex_indices`.
+- Rigs follow glTF: joints are ordinary Nodes (`joint=True`), so other nodes can
+  hang from them; `Mesh.skin` lists its joints with inverse bind matrices and
+  per-vertex (N, K) joint indices and weights.
 - Blend shapes store offsets (not absolute positions), a default `weight`
   (1 = fully applied) and optional in-betweens; weights interpolate linearly
   through the in-betweens, as in FBX and UsdSkel.
