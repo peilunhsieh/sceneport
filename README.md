@@ -150,6 +150,10 @@ must round-trip byte-exactly.
 
 ## Conventions
 
+The reasoning behind these (and the planned animation design) is in
+[docs/design.md](docs/design.md).
+
+
 - `load`/`save` pick the format from the file extension (`.fbx`, `.usd`, `.usda`,
   `.usdc`, `.usdz`).
 - `Scene.meters_per_unit` and `up_axis`/`front_axis`/`right_axis` (signed names
