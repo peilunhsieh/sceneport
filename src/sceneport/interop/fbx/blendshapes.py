@@ -24,7 +24,10 @@ from .binary.node import FBXNode, Prop
 from .document import FBXDocument, FBXObject
 
 
-def read_blend_shapes(doc: FBXDocument, geometry: FBXObject, n_vertices: int) -> list[BlendShape]:
+def read_blend_shapes(
+    doc: FBXDocument, geometry: FBXObject, n_vertices: int, channels: dict[int, str] | None = None
+) -> list[BlendShape]:
+    """Blend shapes on `geometry`. If given, `channels` collects BlendShapeChannel id -> shape name."""
     shapes = []
     for deformer in doc.children_of(geometry, "Deformer"):
         if deformer.subtype != "BlendShape":
@@ -32,6 +35,8 @@ def read_blend_shapes(doc: FBXDocument, geometry: FBXObject, n_vertices: int) ->
         for channel in doc.children_of(deformer, "Deformer"):
             if channel.subtype == "BlendShapeChannel" and (shape := _read_channel(doc, channel, n_vertices)):
                 shapes.append(shape)
+                if channels is not None:
+                    channels[channel.id] = shape.name
     return shapes
 
 
@@ -89,9 +94,11 @@ def _read_channel(doc: FBXDocument, channel: FBXObject, n_vertices: int) -> Blen
     )
 
 
-def write_blend_shapes(doc: FBXDocument, geometry: FBXObject, mesh: Mesh) -> None:
+def write_blend_shapes(doc: FBXDocument, geometry: FBXObject, mesh: Mesh) -> dict[str, FBXObject]:
+    """Writes the mesh's blend shapes; returns shape name -> BlendShapeChannel (for animation)."""
+    written: dict[str, FBXObject] = {}
     if not mesh.blend_shapes:
-        return
+        return written
     deformer = doc.add_object("Deformer", mesh.name, "BlendShape", cls="Deformer", children=[_int("Version", 100)])
     deformer.props_index = 1
     doc.connect(deformer, geometry)
@@ -113,6 +120,7 @@ def write_blend_shapes(doc: FBXDocument, geometry: FBXObject, mesh: Mesh) -> Non
         channel.props_index = 1
         channel.props.set("DeformPercent", "Number", shape.weight * 100.0, flags="A")
         doc.connect(channel, deformer)
+        written[shape.name] = channel
 
         indices = np.arange(mesh.n_vertices, dtype=np.int32) if shape.indices is None else shape.indices
         entries = [(f"{shape.name}_{i.weight * 100:g}", i.offsets, i.normal_offsets) for i in levels]
@@ -132,6 +140,7 @@ def write_blend_shapes(doc: FBXDocument, geometry: FBXObject, mesh: Mesh) -> Non
             )
             target.props_index = 1
             doc.connect(target, channel)
+    return written
 
 
 def _int(name: str, value: int) -> FBXNode:

@@ -13,3 +13,8 @@ wheels/
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
+
+# OS files
+.DS_Store
+._*
+Thumbs.db

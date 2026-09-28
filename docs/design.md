@@ -127,24 +127,42 @@ future changes can keep them consistent (or revisit them deliberately).
   common SkelRoot (their nearest shared ancestor, or a generated wrapper that
   is dropped again on load). Only linear blend skinning is supported.
 
-## Animation (planned)
+## Animation
 
-- **Keyframes, not baked samples.** Clips (`Scene.animations`) hold channels of
-  keys (`times`, `values`) with an interpolation mode (constant, linear,
-  cubic); evaluation samples them at any times and feeds the frame-batched
-  `skinned_vertices` / `deformed_vertices`. FBX tangent data is kept in
-  `extras` for exact FBX round trips.
+- **Keyframes, not baked samples.** `Scene.animations` holds clips
+  (`Animation`: name, fps, optional start/end) of `Channel`s. A channel animates
+  one scalar: a component of a node's `translation` / `rotation` / `scale` /
+  `orientation`, or one blend shape weight (target = the Mesh, property = the
+  shape name). Keys carry a per-key interpolation mode for the segment they
+  start: constant, linear or cubic (Hermite with automatic, Catmull-Rom style
+  tangents; FBX's stored tangent data is kept in `extras` for exact FBX round
+  trips but not evaluated). Values hold before the first and after the last key.
+- **Evaluation is frame-batched:** `Animation.world_matrices` / `joint_world` /
+  `blend_weights` / `skinned_vertices` take an array of times and feed
+  `Mesh.skinned_vertices` / `deformed_vertices`. `Transform.matrix()` accepts
+  per-frame overrides for this.
 - **Rotation channels come in two kinds**, like Blender's rotation modes:
-  Euler (in the node's rotation order; what FBX and USD xformOps use) and
-  quaternion (what UsdSkel and Blender pose bones use). Data stays in the kind
-  it was loaded in; writers convert only when a format requires it.
-- **Blend shape weight channels** are part of the model (FBX `DeformPercent`
-  curves, USD `blendShapeWeights`), so body and face animation can play together.
-- **FBX:** one clip per AnimationStack; empty stacks are skipped; only the
-  first layer of a stack is read at first (warning if there are more).
-- **USD:** one timeline per stage. Every clip is written as its own
-  SkelAnimation prim; the first (or chosen) clip is the active
-  `skel:animationSource`, and non-joint node animation is written only for it.
-  USD time samples interpolate linearly (no tangents; splines are scalar-only),
-  so curves USD can't represent are baked at the clip's frame rate.
-- Frame rate: `Animation.fps` ⇄ FBX `TimeMode` / USD `timeCodesPerSecond`.
+  `rotation` (Euler degrees in the node's rotation order; FBX and USD xformOps)
+  and `orientation` (quaternion w, x, y, z replacing the Euler term; UsdSkel and
+  Blender bones). Quaternion components are interpolated one by one and
+  normalized (as in Blender), so keys must be sign-continuous
+  (`math.quaternion_continuity`). Data stays in the kind it was loaded in;
+  writers convert only where a format requires it (FBX has no quaternion
+  curves: orientation becomes Euler keys at every frame, unwrapped).
+- **FBX:** one clip per AnimationStack (empty stacks skipped; only the first
+  layer is read, with a warning if there are more). Rotation curves are Euler in
+  the node's order; blend shape curves (`DeformPercent`) are percent. Key times
+  are int64 ticks, values float32. The first clip sets the file's TimeMode and
+  time span.
+- **USD:** one timeline per stage. The first clip is on it: its fps becomes
+  `timeCodesPerSecond`, its range `startTimeCode`/`endTimeCode`, and its name is
+  recorded in the root layer's customLayerData. Every clip becomes a
+  SkelAnimation (joint translations, quaternion rotations, scales, blend shape
+  weights) under each skeleton it animates; the first is the bound
+  `skel:animationSource`. Non-joint node animation is written as xformOp time
+  samples, for the first clip only. USD interpolates samples linearly, so clips
+  are baked to one sample per frame. Rest values and default weights are kept
+  as attribute defaults next to the samples, and loading keeps them.
+- **Time codes** are doubles: seconds × fps, snapped to whole frames when only
+  floating-point noise is off, so FBX keys on frames land on integer codes.
+- On load, USD joint keys that never leave the rest value are not turned into channels.

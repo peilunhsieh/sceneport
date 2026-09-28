@@ -8,36 +8,8 @@ from sceneport.interop.fbx.binary import dumps, loads
 from sceneport.interop.fbx.document import FBXDocument
 from sceneport.interop.fbx.skin import matrix_from_fbx
 from sceneport.interop.usd import scene_from_stage, stage_from_scene
-from sceneport.scene import BlendShape, Mesh, Node, Scene, Skin, Transform
-
-
-def rig_scene(shared_parent: bool = False) -> Scene:
-    """A strip along X skinned to a 3-joint chain (root -> mid -> tip), with a helper
-    attached to `mid` and a blend shape. The mesh node is offset, so geom_bind isn't identity."""
-    xs = np.repeat([0.0, 1.0, 2.0], 2)
-    vertices = np.stack([xs, np.tile([0.0, 1.0], 3), np.zeros(6)], axis=1)
-    mesh = Mesh("Strip", vertices, [4, 4], [0, 2, 3, 1, 2, 4, 5, 3])
-    mesh.blend_shapes = [BlendShape("Lift", [[0, 0, 1], [0, 0, 1]], indices=[4, 5], weight=0.5)]
-
-    root = Node("root", Transform(translation=[0, 0, 0]), joint=True)
-    mid = root.add(Node("mid", Transform(translation=[1, 0, 0]), joint=True))
-    mid.add(Node("tip.end", Transform(translation=[1, 0, 0]), joint=True))
-    mid.add(Node("helper", Transform(translation=[0, 2, 0], rotation=[0, 0, 30])))
-    mesh_node = Node("strip", Transform(translation=[0, 0, 0.5]), mesh=mesh)
-
-    # Bind = rest pose; the mesh node is offset by 0.5 in Z.
-    joints = [mid, root]  # skin order differs from hierarchy order on purpose
-    bind = np.stack([Transform(translation=[1, 0, 0]).matrix(), np.eye(4)])
-    mesh.skin = Skin(
-        joints,
-        joint_indices=[[1, 0], [1, 0], [1, 0], [1, 0], [0, 1], [0, 1]],
-        joint_weights=[[1, 0], [1, 0], [0.5, 0.5], [0.5, 0.5], [1, 0], [1, 0]],
-        inverse_bind=np.linalg.inv(bind),
-        geom_bind=mesh_node.transform.matrix(),
-    )
-    if shared_parent:
-        return Scene(nodes=[Node("character", children=[root, mesh_node])])
-    return Scene(nodes=[root, mesh_node])
+from sceneport.scene import Mesh, Node, Scene, Skin, Transform
+from helpers import rig_scene
 
 
 def pose(scene: Scene) -> None:

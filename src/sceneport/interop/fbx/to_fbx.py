@@ -8,6 +8,7 @@ import numpy as np
 
 from ...scene.types import TRANSFORM_PROPERTIES, Mesh, Node, Scene, Transform
 from . import layers
+from .animation import write_animations
 from .blendshapes import write_blend_shapes
 from .binary import write
 from .binary.node import FBXNode, Prop
@@ -25,6 +26,7 @@ def document_from_scene(scene: Scene, *, version: int = 7400) -> FBXDocument:
     geometries: dict[int, FBXObject] = {}  # id(Mesh) -> Geometry, so shared meshes are written once
     first_users: dict[int, tuple[Mesh, FBXObject]] = {}  # id(Mesh) -> (mesh, first Model using it)
     models: dict[Node, FBXObject] = {}
+    shape_channels: dict[tuple[int, str], FBXObject] = {}  # (id(Mesh), shape name) -> BlendShapeChannel
 
     def add(node: Node, parent_id: int) -> None:
         model = doc.add_object("Model", node.name, _model_subtype(node))
@@ -52,7 +54,8 @@ def document_from_scene(scene: Scene, *, version: int = 7400) -> FBXDocument:
         if node.mesh is not None:
             key = id(node.mesh)
             if key not in geometries:
-                geometries[key] = _add_geometry(doc, node.mesh)
+                geometries[key], channels = _add_geometry(doc, node.mesh)
+                shape_channels.update(((key, name), channel) for name, channel in channels.items())
                 first_users[key] = (node.mesh, model)
             doc.connect(geometries[key], model)
         for child in node.children:
@@ -70,6 +73,7 @@ def document_from_scene(scene: Scene, *, version: int = 7400) -> FBXDocument:
         entries = [(mesh_model, mesh.skin.geom_bind)]
         entries += [(models[joint], bind_world[j]) for j, joint in enumerate(mesh.skin.joints)]
         write_bind_pose(doc, mesh.name, entries)
+    write_animations(doc, scene, models, shape_channels)
     return doc
 
 
@@ -97,7 +101,7 @@ def _transform_props(t: Transform) -> Properties70:
     return props
 
 
-def _add_geometry(doc: FBXDocument, mesh: Mesh) -> FBXObject:
+def _add_geometry(doc: FBXDocument, mesh: Mesh) -> tuple[FBXObject, dict[str, FBXObject]]:
     mesh.validate()
     pvi = mesh.face_vertex_indices.copy()
     ends = np.cumsum(mesh.face_vertex_counts) - 1
@@ -120,5 +124,4 @@ def _add_geometry(doc: FBXDocument, mesh: Mesh) -> FBXObject:
         children += layers.write_layer_table(table)
 
     geometry = doc.add_object("Geometry", mesh.name, "Mesh", children=children)
-    write_blend_shapes(doc, geometry, mesh)
-    return geometry
+    return geometry, write_blend_shapes(doc, geometry, mesh)

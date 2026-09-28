@@ -44,7 +44,15 @@ import numpy as np
 from numpy.typing import NDArray
 from pxr import Gf, Sdf, Tf, Usd, UsdGeom, UsdSkel, UsdUtils, Vt
 
-from ..math import ROTATION_ORDERS, decompose_matrix
+from ..math import (
+    ROTATION_ORDERS,
+    decompose_matrix,
+    euler_from_matrix,
+    quaternion_continuity,
+    quaternion_from_matrix,
+    quaternion_matrix,
+)
+from ..scene.animation import Animation, Channel, rest_value
 from ..scene.types import BlendShape, Inbetween, Mesh, Node, Primvar, Scene, Skin, Transform
 
 EXTENSIONS = (".usd", ".usda", ".usdc", ".usdz")
@@ -52,9 +60,11 @@ NAME_KEY = "sceneport:name"  # customData: a primvar's original name
 JOINT_KEY = "sceneport:joint"  # customData: joint token an attachment hangs from
 GENERATED_KEY = "sceneport:generated"  # customData: SkelRoot added only to satisfy UsdSkel
 JOINT_OP = "sceneportJoint"  # xformOp suffix placing an attachment at its joint
+ACTIVE_CLIP_KEY = "sceneport:activeClip"  # root layer customLayerData: name of the clip on the timeline
 IMPLIED_AXES = {"+Y": ("+Z", "+X"), "+Z": ("-Y", "+X")}  # up -> (front, right)
 
 _TIME = Usd.TimeCode.EarliestTime()
+_DEFAULT = Usd.TimeCode.Default()
 _PREDICATE = Usd.TraverseInstanceProxies(Usd.PrimDefaultPredicate)
 _DOUBLE = UsdGeom.XformOp.PrecisionDouble
 
@@ -155,6 +165,8 @@ class _SkeletonPlan:
     skel_space: dict[Node, NDArray] = field(default_factory=dict)  # joint -> rest matrix relative to the Skeleton
     path: Sdf.Path | None = None
     shape_weights: dict[str, float] = field(default_factory=dict)  # blend shape token -> default weight
+    shape_targets: dict[tuple[int, str], str] = field(default_factory=dict)  # (id(Mesh), shape name) -> token
+    child_names: set[str] = field(default_factory=set)  # prim names used under the Skeleton
 
     def build(self) -> None:
         self.joints, self.tokens, self.skel_space = [], {}, {}
@@ -182,6 +194,14 @@ class _Writer:
         self.skel_roots: set[Node] = set()  # nodes written as SkelRoot
         self.wrapped: list[Node] = []  # root nodes placed under a generated SkelRoot
         self.bindings: list[tuple[UsdGeom.Mesh, Mesh, _SkeletonPlan]] = []
+        self.own_skeletons: list[_SkeletonPlan] = []  # jointless skeletons of unskinned blend shape meshes
+        for clip in scene.animations:
+            clip.validate()
+        # Only the first clip is on the timeline (USD has one per stage); it also drives node transforms.
+        self.active = scene.animations[0] if scene.animations else None
+        self.fps = self.active.fps if self.active else 24.0
+        self.active_times = self.active.frame_times() if self.active else np.zeros(0)
+        self.active_values = self.active.node_values(self.active_times) if self.active else {}
         self._plan()
 
     # planning
@@ -235,6 +255,13 @@ class _Writer:
     # writing
 
     def write(self) -> None:
+        if self.active is not None:
+            start, end = self.active.time_range()
+            self.stage.SetTimeCodesPerSecond(self.fps)
+            self.stage.SetFramesPerSecond(self.fps)
+            self.stage.SetStartTimeCode(_time_code(start, self.fps))
+            self.stage.SetEndTimeCode(_time_code(end, self.fps))
+            self.stage.GetRootLayer().customLayerData = {ACTIVE_CLIP_KEY: self.active.name}
         taken: set[str] = set()
         root_paths = []
         wrapper: tuple[Sdf.Path, set[str]] | None = None
@@ -271,7 +298,10 @@ class _Writer:
             token, matrix = joint
             xform.AddTransformOp(precision=_DOUBLE, opSuffix=JOINT_OP).Set(Gf.Matrix4d(matrix.T.tolist()))
             xform.GetPrim().SetCustomDataByKey(JOINT_KEY, token)
-        _write_transform(xform, node.transform)
+        animated = self.active_values.get(node, {})
+        ops = _write_transform(xform, node.transform, force={"rotation" if p == "orientation" else p for p in animated})
+        if animated:
+            self._write_samples(ops, node, animated)
 
         child_names: set[str] = set()
         if mesh is not None:
@@ -281,11 +311,15 @@ class _Writer:
             if mesh.skin is not None:
                 plan = self.plans[self._root_joint(mesh.skin.joints[0])]
                 plan.shape_weights.update(zip(tokens, (float(s.weight) for s in mesh.blend_shapes)))
+                plan.shape_targets.update(((id(mesh), s.name), t) for s, t in zip(mesh.blend_shapes, tokens))
                 self.bindings.append((usd_mesh, mesh, plan))
             elif own_skeleton:
                 skel_path = path.AppendChild(_prim_name("Skel", child_names))
                 UsdSkel.Skeleton.Define(self.stage, skel_path)
-                _write_animation(self.stage, skel_path, dict(zip(tokens, (float(s.weight) for s in mesh.blend_shapes))))
+                own = _SkeletonPlan([], node, path=skel_path)
+                own.shape_weights = dict(zip(tokens, (float(s.weight) for s in mesh.blend_shapes)))
+                own.shape_targets = {(id(mesh), s.name): t for s, t in zip(mesh.blend_shapes, tokens)}
+                self.own_skeletons.append(own)
                 UsdSkel.BindingAPI.Apply(usd_mesh.GetPrim()).CreateSkeletonRel().SetTargets([skel_path])
 
         for child in node.children:
@@ -317,7 +351,7 @@ class _Writer:
         skeleton.CreateRestTransformsAttr(_matrix_array([j.transform.matrix() for j in plan.joints]))
         skeleton.CreateBindTransformsAttr(_matrix_array([bind[j] for j in plan.joints]))
 
-        child_names: set[str] = set()
+        child_names = plan.child_names
         for joint in plan.joints:
             if joint.mesh is not None:
                 warnings.warn(f"joint {joint.name!r} has a mesh; USD joints can't carry geometry, so it is dropped")
@@ -338,9 +372,80 @@ class _Writer:
             weights = np.ascontiguousarray(skin.joint_weights.ravel(), dtype=np.float32)
             binding.CreateJointWeightsPrimvar(False, k).Set(Vt.FloatArray.FromNumpy(weights))
             binding.CreateGeomBindTransformAttr(Gf.Matrix4d(skin.geom_bind.T.tolist()))
-        for plan in set(self.plans.values()):
-            if plan.shape_weights:
-                _write_animation(self.stage, plan.path, plan.shape_weights)
+        for plan in [*set(self.plans.values()), *self.own_skeletons]:
+            self._write_skeleton_animations(plan)
+
+    def _write_samples(self, ops: dict, node: Node, values: dict[str, NDArray]) -> None:
+        """Time samples on the node's xformOps for the active clip (rest values stay as defaults)."""
+        codes = [_time_code(t, self.fps) for t in self.active_times]
+        for prop, frames in values.items():
+            if prop == "orientation":  # xformOps rotate with Euler angles
+                euler = euler_from_matrix(quaternion_matrix(frames), node.transform.rotation_order)
+                prop, frames = "rotation", np.degrees(np.unwrap(np.radians(euler), axis=0))
+            attr = ops[prop].GetAttr()
+            for code, value in zip(codes, frames):
+                attr.Set(Gf.Vec3d(*(float(v) for v in value)), float(code))
+
+    def _write_skeleton_animations(self, plan: _SkeletonPlan) -> None:
+        """One SkelAnimation per clip touching the plan's joints or blend shapes; the active clip is bound."""
+        joints = set(plan.joints)
+        clips = [
+            clip for clip in self.scene.animations
+            if any(c.target in joints if not c.is_blend_shape else (id(c.target), c.property) in plan.shape_targets
+                   for c in clip.channels)
+        ]  # fmt: skip
+        source = None
+        for clip in clips:
+            path = plan.path.AppendChild(_prim_name(clip.name, plan.child_names))
+            self._write_clip(path, plan, clip)
+            if clip is self.active:
+                source = path
+        if source is None and plan.shape_weights:  # no animation on the timeline: hold the default weights
+            source = plan.path.AppendChild(_prim_name("Anim", plan.child_names))
+            _write_animation(self.stage, source, plan.shape_weights)
+        if source is not None:
+            skeleton = self.stage.GetPrimAtPath(plan.path)
+            UsdSkel.BindingAPI.Apply(skeleton).CreateAnimationSourceRel().SetTargets([source])
+
+    def _write_clip(self, path: Sdf.Path, plan: _SkeletonPlan, clip: Animation) -> None:
+        animation = UsdSkel.Animation.Define(self.stage, path)
+        _set_display_name(animation.GetPrim(), clip.name)
+        times = clip.frame_times()
+        codes = [_time_code(t, self.fps) for t in times]
+        if plan.joints:
+            values = clip.node_values(times)
+            local = np.stack(
+                [np.broadcast_to(j.transform.matrix(**values.get(j, {})), (len(times), 4, 4)) for j in plan.joints], axis=1
+            )  # (F, J, 4, 4)
+            translations = local[..., :3, 3]
+            scales = np.linalg.norm(local[..., :3, :3], axis=-2)
+            rotations = quaternion_from_matrix(local[..., :3, :3] / scales[..., None, :])
+            for f in range(1, len(times)):  # keep each joint's quaternion signs continuous over time
+                rotations[f] *= np.where(np.sum(rotations[f] * rotations[f - 1], axis=-1, keepdims=True) < 0, -1, 1)
+            animation.CreateJointsAttr(Vt.TokenArray([plan.tokens[j] for j in plan.joints]))
+            t_attr, r_attr, s_attr = (animation.CreateTranslationsAttr(), animation.CreateRotationsAttr(), animation.CreateScalesAttr())
+            for f, code in enumerate(codes):
+                t_attr.Set(Vt.Vec3fArray.FromNumpy(np.ascontiguousarray(translations[f], dtype=np.float32)), float(code))
+                r_attr.Set(Vt.QuatfArray.FromNumpy(np.ascontiguousarray(rotations[f][:, [1, 2, 3, 0]], dtype=np.float32)), float(code))
+                s_attr.Set(Vt.Vec3hArray.FromNumpy(np.ascontiguousarray(scales[f], dtype=np.float16)), float(code))
+        if plan.shape_targets:
+            tokens = list(dict.fromkeys(plan.shape_targets.values()))
+            index = {token: i for i, token in enumerate(tokens)}
+            weights = np.tile([plan.shape_weights[t] for t in tokens], (len(times), 1))
+            for channel in clip.channels:
+                token = plan.shape_targets.get((id(channel.target), channel.property)) if channel.is_blend_shape else None
+                if token is not None:
+                    weights[:, index[token]] = channel.evaluate(times)
+            animation.CreateBlendShapesAttr(Vt.TokenArray(tokens))
+            w_attr = animation.CreateBlendShapeWeightsAttr(Vt.FloatArray([plan.shape_weights[t] for t in tokens]))
+            for f, code in enumerate(codes):
+                w_attr.Set(Vt.FloatArray.FromNumpy(np.ascontiguousarray(weights[f], dtype=np.float32)), float(code))
+
+
+def _time_code(seconds: float, fps: float) -> float:
+    """Seconds -> time code, snapped to whole frames when floating-point noise is all that's off."""
+    code = float(seconds) * fps
+    return float(round(code)) if abs(code - round(code)) < 1e-9 else code
 
 
 def _matrix_array(matrices) -> Vt.Matrix4dArray:
@@ -354,26 +459,31 @@ def _set_display_name(prim: Usd.Prim, name: str) -> None:
         prim.SetDisplayName(name)
 
 
-def _add_op(xf: UsdGeom.Xformable, kind: str, value=None, suffix: str = "", inverse: bool = False) -> None:
+def _add_op(xf: UsdGeom.Xformable, kind: str, value=None, suffix: str = "", inverse: bool = False) -> UsdGeom.XformOp:
     op = getattr(xf, f"Add{kind}Op")(precision=_DOUBLE, opSuffix=suffix, isInverseOp=inverse)
     if value is not None:
         op.GetAttr().Set(Gf.Vec3d(*(float(v) for v in value)))
+    return op
 
 
-def _write_transform(xf: UsdGeom.Xformable, t: Transform) -> None:
+def _write_transform(xf: UsdGeom.Xformable, t: Transform, force: set[str] = frozenset()) -> dict[str, UsdGeom.XformOp]:
+    """Write `t` as xformOps; returns the translate/rotate/scale ops. Properties in `force`
+    ("translation", "rotation", "scale") get an op even at their identity value, for animation."""
+    ops = {}
+
     def nonzero(v):
         return bool(np.any(v))
 
-    if nonzero(t.translation):
-        _add_op(xf, "Translate", t.translation)
+    if nonzero(t.translation) or "translation" in force:
+        ops["translation"] = _add_op(xf, "Translate", t.translation)
     if nonzero(t.rotation_offset):
         _add_op(xf, "Translate", t.rotation_offset, "rotateOffset")
     if nonzero(t.rotation_pivot):
         _add_op(xf, "Translate", t.rotation_pivot, "rotatePivot")
     if nonzero(t.pre_rotation):
         _add_op(xf, "RotateXYZ", t.pre_rotation, "preRotation")
-    if nonzero(t.rotation) or t.rotation_order != 0:
-        _add_op(xf, f"Rotate{ROTATION_ORDERS[t.rotation_order]}", t.rotation)
+    if nonzero(t.rotation) or t.rotation_order != 0 or "rotation" in force:
+        ops["rotation"] = _add_op(xf, f"Rotate{ROTATION_ORDERS[t.rotation_order]}", t.rotation)
     if nonzero(t.post_rotation):
         _add_op(xf, "RotateXYZ", t.post_rotation, "postRotation", inverse=True)
     if nonzero(t.rotation_pivot):
@@ -382,10 +492,11 @@ def _write_transform(xf: UsdGeom.Xformable, t: Transform) -> None:
         _add_op(xf, "Translate", t.scaling_offset, "scaleOffset")
     if nonzero(t.scaling_pivot):
         _add_op(xf, "Translate", t.scaling_pivot, "scalePivot")
-    if not np.array_equal(t.scale, [1, 1, 1]):
-        _add_op(xf, "Scale", t.scale)
+    if not np.array_equal(t.scale, [1, 1, 1]) or "scale" in force:
+        ops["scale"] = _add_op(xf, "Scale", t.scale)
     if nonzero(t.scaling_pivot):
         _add_op(xf, "Translate", suffix="scalePivot", inverse=True)
+    return ops
 
 
 def _write_geometric(xf: UsdGeom.Xformable, t: Transform) -> None:
@@ -447,13 +558,11 @@ def _write_blend_shape_targets(stage: Usd.Stage, usd_mesh: UsdGeom.Mesh, mesh: M
     return tokens
 
 
-def _write_animation(stage: Usd.Stage, skel_path: Sdf.Path, weights: dict[str, float]) -> None:
-    """A SkelAnimation under the Skeleton holding default blend shape weights."""
-    animation = UsdSkel.Animation.Define(stage, skel_path.AppendChild("Anim"))
+def _write_animation(stage: Usd.Stage, path: Sdf.Path, weights: dict[str, float]) -> None:
+    """A SkelAnimation holding constant (default) blend shape weights."""
+    animation = UsdSkel.Animation.Define(stage, path)
     animation.CreateBlendShapesAttr(Vt.TokenArray(list(weights)))
     animation.CreateBlendShapeWeightsAttr(Vt.FloatArray(list(weights.values())))
-    skeleton = stage.GetPrimAtPath(skel_path)
-    UsdSkel.BindingAPI.Apply(skeleton).CreateAnimationSourceRel().SetTargets([animation.GetPath()])
 
 
 def _vec3f(values) -> Vt.Vec3fArray:
@@ -478,12 +587,19 @@ class _Reader:
         # Skeleton path -> (joint token -> Node, joint token -> world bind matrix)
         self.skeletons: dict[Sdf.Path, tuple[dict[str, Node], dict[str, NDArray]]] = {}
         self.pending_skins: list[tuple[Mesh, Usd.Prim]] = []
+        # Skeleton path -> (SkelAnimation prims, the bound one); and blend shape token maps of meshes bound to it
+        self.skeleton_animations: dict[Sdf.Path, tuple[list[Usd.Prim], Sdf.Path | None]] = {}
+        self.bound_shapes: dict[Sdf.Path, list[tuple[Mesh, dict[str, str]]]] = {}
+        self.node_channels: list[Channel] = []  # time-sampled xformOps: the timeline's clip
+        self.fps = 24.0
 
     def read(self, stage: Usd.Stage, scene: Scene) -> None:
+        self.fps = stage.GetTimeCodesPerSecond()
         for prim in stage.GetPseudoRoot().GetFilteredChildren(_PREDICATE):
             self.read_prim(prim, scene.nodes)
         for mesh, prim in self.pending_skins:  # after all skeletons are known
             mesh.skin = self.read_skin(prim, mesh)
+        scene.animations = self.read_animations(stage)
 
     def read_prim(self, prim: Usd.Prim, siblings: list[Node]) -> None:
         if prim.IsA(UsdSkel.Skeleton):
@@ -498,6 +614,7 @@ class _Reader:
 
         node = Node(_display_name(prim), _read_transform(UsdGeom.Xformable(prim)))
         siblings.append(node)
+        self.read_node_samples(UsdGeom.Xformable(prim), node)
         if prim.IsA(UsdGeom.Mesh):
             node.mesh = self.get_mesh(prim)
         else:
@@ -544,6 +661,13 @@ class _Reader:
             if bind is not None and len(bind) == len(tokens):
                 bind_by_token[token] = bind[i]
         self.skeletons[prim.GetPath()] = (by_token, bind_by_token)
+        animations = [c for c in prim.GetChildren() if c.IsA(UsdSkel.Animation)]
+        source = UsdSkel.BindingAPI(prim).GetAnimationSourceRel().GetTargets()
+        source_path = source[0] if source else None
+        if source_path is not None and all(a.GetPath() != source_path for a in animations):
+            if (bound := prim.GetStage().GetPrimAtPath(source_path)) and bound.IsA(UsdSkel.Animation):
+                animations.append(bound)
+        self.skeleton_animations[prim.GetPath()] = (animations, source_path)
 
         for child in prim.GetFilteredChildren(_PREDICATE):
             token = child.GetCustomDataByKey(JOINT_KEY)
@@ -560,9 +684,102 @@ class _Reader:
                 if not ref.assetPath and ref.primPath in self.meshes:
                     return self.meshes[ref.primPath]
         mesh = self.meshes[prim.GetPath()] = _read_mesh(prim)
-        if UsdSkel.BindingAPI(prim).GetJointIndicesAttr().HasAuthoredValue():
+        binding = UsdSkel.BindingAPI(prim)
+        if binding.GetJointIndicesAttr().HasAuthoredValue():
             self.pending_skins.append((mesh, prim))
+        skeleton = binding.GetInheritedSkeleton()
+        if skeleton and mesh.blend_shapes:
+            self.bound_shapes.setdefault(skeleton.GetPath(), []).append((mesh, _shape_token_names(prim)))
         return mesh
+
+    def read_node_samples(self, xf: UsdGeom.Xformable, node: Node) -> None:
+        """Channels for time-sampled xformOps (translate / rotate / scale; else the decomposed matrix)."""
+        ops = [op for op in xf.GetOrderedXformOps() if op.GetOpName() != f"xformOp:transform:{JOINT_OP}"]
+        if not any(op.GetAttr().GetNumTimeSamples() > 1 for op in ops):
+            return
+        fields = {"xformOp:translate": "translation", "xformOp:scale": "scale"}
+        fields.update({f"xformOp:rotate{order}": "rotation" for order in ROTATION_ORDERS})
+        animated = [op for op in ops if op.GetAttr().GetNumTimeSamples() > 1]
+        if all(op.GetOpName() in fields for op in animated):
+            for op in animated:
+                codes = np.array(op.GetAttr().GetTimeSamples())
+                values = np.array([op.GetAttr().Get(c) for c in codes], dtype=np.float64)
+                self.node_channels += [
+                    Channel(node, fields[op.GetOpName()], axis, codes / self.fps, values[:, axis]) for axis in range(3)
+                ]
+            return
+        codes = np.array(xf.GetTimeSamples())  # other op stacks: decompose the local matrix at every sample
+        matrices = np.stack([np.array(xf.GetLocalTransformation(c)).T for c in codes])
+        joint_op = [op for op in xf.GetOrderedXformOps() if op.GetOpName() == f"xformOp:transform:{JOINT_OP}"]
+        if joint_op:
+            matrices = np.linalg.inv(np.array(joint_op[0].GetOpTransform(_TIME)).T) @ matrices
+        translation, rotation, scale = decompose_matrix(matrices, node.transform.rotation_order)
+        rotation = np.degrees(np.unwrap(np.radians(rotation), axis=0))
+        for prop, values in (("translation", translation), ("rotation", rotation), ("scale", scale)):
+            self.node_channels += [Channel(node, prop, axis, codes / self.fps, values[:, axis]) for axis in range(3)]
+
+    def read_animations(self, stage: Usd.Stage) -> list[Animation]:
+        """Clips from SkelAnimation prims (by name) plus node time samples (the timeline's clip)."""
+        clips: dict[str, Animation] = {}
+        active_name = stage.GetRootLayer().customLayerData.get(ACTIVE_CLIP_KEY)
+        for skel_path, (animations, source_path) in self.skeleton_animations.items():
+            by_token = self.skeletons[skel_path][0]
+            for prim in animations:
+                channels = self.read_skel_animation(UsdSkel.Animation(prim), by_token, self.bound_shapes.get(skel_path, []))
+                if not channels:
+                    continue
+                name = _display_name(prim)
+                clips.setdefault(name, Animation(name, fps=self.fps)).channels += channels
+                if prim.GetPath() == source_path and active_name is None:
+                    active_name = name
+        if self.node_channels:
+            name = active_name or "animation"
+            clips.setdefault(name, Animation(name, fps=self.fps)).channels += self.node_channels
+        if active_name in clips and stage.HasAuthoredTimeCodeRange():
+            clips[active_name].start = stage.GetStartTimeCode() / self.fps
+            clips[active_name].end = stage.GetEndTimeCode() / self.fps
+        return sorted(clips.values(), key=lambda clip: clip.name != active_name)
+
+    def read_skel_animation(self, animation: UsdSkel.Animation, by_token, bound_shapes) -> list[Channel]:
+        """Channels from one SkelAnimation; keys that never leave the rest value are dropped."""
+        channels = []
+        joints = [by_token.get(str(t)) for t in animation.GetJointsAttr().Get() or []]
+        for attr, prop in ((animation.GetTranslationsAttr(), "translation"), (animation.GetRotationsAttr(), "orientation"),
+                           (animation.GetScalesAttr(), "scale")):  # fmt: skip
+            codes = attr.GetTimeSamples()
+            if not codes:
+                continue
+            data = np.stack([np.array(attr.Get(c), dtype=np.float64) for c in codes])  # (F, J, 3 or 4)
+            if prop == "orientation":
+                data = data[..., [3, 0, 1, 2]]  # USD stores (x, y, z, w)
+            times = np.array(codes) / self.fps
+            for j, node in enumerate(joints):
+                if node is None or j >= data.shape[1]:
+                    continue
+                values, rest = data[:, j], rest_value(node, prop)
+                if prop == "orientation":
+                    values = quaternion_continuity(values)
+                    if np.allclose(values, rest, atol=1e-6) or np.allclose(values, -rest, atol=1e-6):
+                        continue
+                    channels += [Channel(node, prop, c, times, values[:, c]) for c in range(4)]
+                else:
+                    channels += [
+                        Channel(node, prop, c, times, values[:, c])
+                        for c in range(3) if not np.allclose(values[:, c], rest[c], atol=1e-6)
+                    ]  # fmt: skip
+        attr = animation.GetBlendShapeWeightsAttr()
+        codes = attr.GetTimeSamples()
+        if codes:
+            tokens = [str(t) for t in animation.GetBlendShapesAttr().Get() or []]
+            data = np.stack([np.array(attr.Get(c), dtype=np.float64) for c in codes])
+            times = np.array(codes) / self.fps
+            for mesh, names in bound_shapes:
+                defaults = {shape.name: shape.weight for shape in mesh.blend_shapes}
+                for i, token in enumerate(tokens):
+                    name = names.get(token)
+                    if name in defaults and not np.allclose(data[:, i], defaults[name], atol=1e-6):
+                        channels.append(Channel(mesh, name, 0, times, data[:, i]))
+        return channels
 
     def read_skin(self, prim: Usd.Prim, mesh: Mesh) -> Skin | None:
         binding = UsdSkel.BindingAPI(prim)
@@ -627,7 +844,7 @@ def _read_transform(xf: UsdGeom.Xformable) -> Transform:
         positions.append(_OP_INDEX[name])
         field_name = _OP_STACK[_OP_INDEX[name]][1]
         if field_name is not None:
-            values[field_name] = np.asarray(op.GetAttr().Get(_TIME), dtype=np.float64)
+            values[field_name] = np.asarray(_static_value(op.GetAttr()), dtype=np.float64)
     names = {op.GetOpName() for op in ops}
     pivots_paired = all(
         (f"xformOp:translate:{p}" in names) == (f"!invert!xformOp:translate:{p}" in names)
@@ -692,7 +909,7 @@ def _read_blend_shapes(prim: Usd.Prim, n_vertices: int) -> list[BlendShape]:
         animation = UsdSkel.Animation(UsdSkel.BindingAPI(skeleton.GetPrim()).GetInheritedAnimationSource())
         if animation:
             names = animation.GetBlendShapesAttr().Get() or []
-            values = animation.GetBlendShapeWeightsAttr().Get(_TIME) or []
+            values = _static_value(animation.GetBlendShapeWeightsAttr()) or []
             weights = dict(zip(names, values))
 
     shapes = []
@@ -715,6 +932,25 @@ def _read_blend_shapes(prim: Usd.Prim, n_vertices: int) -> list[BlendShape]:
             inbetweens=inbetweens,
         ))  # fmt: skip
     return shapes
+
+
+def _static_value(attr: Usd.Attribute):
+    """An attribute's default (unanimated) value if authored, else its first time sample."""
+    value = attr.Get(_DEFAULT)
+    return value if value is not None else attr.Get(_TIME)
+
+
+def _shape_token_names(prim: Usd.Prim) -> dict[str, str]:
+    """skel:blendShapes token -> blend shape name, as _read_blend_shapes names them."""
+    binding = UsdSkel.BindingAPI(prim)
+    tokens = [str(t) for t in binding.GetBlendShapesAttr().Get() or []]
+    targets = binding.GetBlendShapeTargetsRel().GetTargets() if binding.GetBlendShapeTargetsRel() else []
+    out = {}
+    for token, target in zip(tokens, targets):
+        shape_prim = prim.GetStage().GetPrimAtPath(target)
+        if shape_prim and shape_prim.IsA(UsdSkel.BlendShape):
+            out[token] = shape_prim.GetDisplayName() or token
+    return out
 
 
 def _optional_vec3(values) -> NDArray | None:

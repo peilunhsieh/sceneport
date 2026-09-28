@@ -9,6 +9,7 @@ import numpy as np
 
 from ...scene.types import ROTATION_ACTIVE_FIELDS, TRANSFORM_PROPERTIES, Mesh, Node, Scene, Transform
 from . import layers
+from .animation import fps_from_settings, read_animations
 from .blendshapes import read_blend_shapes
 from .binary import read
 from .document import FBXDocument, FBXObject
@@ -25,6 +26,7 @@ def scene_from_document(doc: FBXDocument) -> Scene:
     read_global_settings(doc.global_settings, scene)
     meshes: dict[int, Mesh] = {}  # geometry id -> Mesh, so shared geometry stays shared
     nodes: dict[int, Node] = {}
+    shapes: dict[int, tuple[Mesh, str]] = {}  # BlendShapeChannel id -> (mesh, shape name)
 
     models = list(doc.iter_objects("Model"))
     for model in models:
@@ -36,7 +38,9 @@ def scene_from_document(doc: FBXDocument) -> Scene:
                 continue
             if geom.id not in meshes:
                 mesh = meshes[geom.id] = mesh_from_geometry(geom)
-                mesh.blend_shapes = read_blend_shapes(doc, geom, mesh.n_vertices)
+                channels: dict[int, str] = {}
+                mesh.blend_shapes = read_blend_shapes(doc, geom, mesh.n_vertices, channels)
+                shapes.update((cid, (mesh, name)) for cid, name in channels.items())
             node.mesh = meshes[geom.id]
             break
 
@@ -50,6 +54,7 @@ def scene_from_document(doc: FBXDocument) -> Scene:
     # Skins last: their joints can be anywhere in the hierarchy.
     for geom_id, mesh in meshes.items():
         mesh.skin = read_skin(doc, doc.objects[geom_id], mesh.n_vertices, nodes)
+    scene.animations = read_animations(doc, nodes, shapes, fps_from_settings(doc.global_settings))
     return scene
 
 

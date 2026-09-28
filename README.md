@@ -53,6 +53,12 @@ scene.find("l_lowleg").transform.rotation += [0, 0, 60]
 mesh.skinned_vertices(skin.joint_world(scene))  # world-space (N, 3); (F, J, 4, 4) poses -> (F, N, 3)
 skin.dense_weights()                     # (N, J) weights, SMPL-style
 
+# Animation: clips of keyframed channels, evaluated for any times
+clip = scene.animations[0]               # e.g. one per FBX animation stack
+times = clip.frame_times()               # one per frame at clip.fps
+clip.skinned_vertices(scene, mesh, times)  # (F, N, 3)
+clip.world_matrices(scene, times)        # {node: (F, 4, 4)}
+
 sceneport.save(scene, "out.fbx")
 ```
 
@@ -97,6 +103,16 @@ scene = sceneport.load("model.usd")  # composed stage: references, payloads, ins
   joints are written under the Skeleton, placed at their joint's rest pose, and
   re-attached on load. When a skinned mesh and its skeleton share no ancestor,
   a SkelRoot is generated around them and dropped again on load.
+
+## Converting files
+
+```bash
+sceneport convert model.fbx model.usd   # the formats follow the extensions
+sceneport convert model.usdz model.fbx  # .fbx, .usd, .usda, .usdc, .usdz
+```
+
+Meshes, blend shapes, skins and animation carry over (see the conventions
+below for what each format can hold).
 
 ## Inspecting files
 
@@ -146,11 +162,11 @@ must round-trip byte-exactly.
 - [x] Phase 2 — blend shapes (with in-betweens), FBX and USD
 - [ ] Phase 3 — materials / textures
 - [x] Phase 4 — skeleton / skinning (linear blend skinning), FBX and USD
-- [ ] Phase 5 — animation
+- [x] Phase 5 — animation (keyframes, joints/nodes/blend shape weights), FBX and USD
 
 ## Conventions
 
-The reasoning behind these (and the planned animation design) is in
+The reasoning behind these is in
 [docs/design.md](docs/design.md).
 
 

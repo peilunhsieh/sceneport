@@ -49,3 +49,24 @@ def test_cli_bad_file(tmp_path, capsys):
     with pytest.raises(SystemExit) as e:
         main(["dump", str(bad)])
     assert "not a binary FBX file" in str(e.value)
+
+
+def test_cli_convert(tmp_path, capsys):
+    import sceneport
+    from sceneport.scene import Animation, Channel
+    from helpers import rig_scene
+
+    scene = rig_scene()
+    scene.animations = [Animation("wave", [Channel(scene.find("mid"), "rotation", 2, [0.0, 1.0], [0.0, 90.0])], fps=4)]
+    sceneport.save(scene, tmp_path / "rig.fbx")
+
+    main(["convert", str(tmp_path / "rig.fbx"), str(tmp_path / "out" / "rig.usda")])  # creates out/
+    main(["convert", str(tmp_path / "out" / "rig.usda"), str(tmp_path / "back.fbx")])
+    out = capsys.readouterr().out
+    assert "rig.usda: 1 meshes, 3 joints, animations: wave (5 frames)" in out
+    back = sceneport.load(tmp_path / "back.fbx")
+    assert [c.name for c in back.animations] == ["wave"] and back.meshes[0].skin is not None
+
+    with pytest.raises(SystemExit) as e:
+        main(["convert", str(tmp_path / "rig.fbx"), str(tmp_path / "rig.obj")])
+    assert "unsupported file extension '.obj'" in str(e.value)

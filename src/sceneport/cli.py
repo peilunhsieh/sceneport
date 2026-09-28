@@ -1,11 +1,13 @@
-"""Command line entry point, e.g. `sceneport dump file.fbx`."""
+"""Command line entry point, e.g. `sceneport dump file.fbx` or `sceneport convert in.fbx out.usd`."""
 
 from __future__ import annotations
 
 import argparse
 import json
 import sys
+from pathlib import Path
 
+from . import load, save
 from .interop.fbx.binary import FBXParseError, read
 from .interop.fbx.binary.dump import format_tree, to_json
 
@@ -20,6 +22,16 @@ def _dump(args: argparse.Namespace) -> None:
         print(format_tree(fbx, max_items=max_items, max_depth=args.depth))
 
 
+def _convert(args: argparse.Namespace) -> None:
+    scene = load(args.input)
+    output = Path(args.output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    save(scene, output)
+    joints = sum(node.joint for node, _ in scene.walk())
+    clips = ", ".join(f"{clip.name} ({len(clip.frame_times())} frames)" for clip in scene.animations) or "none"
+    print(f"{args.input} -> {output}: {len(scene.meshes)} meshes, {joints} joints, animations: {clips}")
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="sceneport", description="3D scene file tools.")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -32,12 +44,17 @@ def main(argv: list[str] | None = None) -> None:
     dump.add_argument("--full", action="store_true", help="show all array items")
     dump.set_defaults(func=_dump)
 
+    convert = sub.add_parser("convert", help="convert between formats: .fbx, .usd, .usda, .usdc, .usdz")
+    convert.add_argument("input")
+    convert.add_argument("output", help="the format follows the extension")
+    convert.set_defaults(func=_convert)
+
     args = parser.parse_args(argv)
     try:
         args.func(args)
     except BrokenPipeError:  # e.g. `sceneport dump x.fbx | head`
         sys.stderr.close()
-    except (FBXParseError, OSError) as e:
+    except (FBXParseError, OSError, ValueError) as e:
         sys.exit(f"sceneport: {e}")
 
 

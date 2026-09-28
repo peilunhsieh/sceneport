@@ -3,7 +3,7 @@ from pathlib import Path
 import numpy as np
 
 from sceneport.interop.fbx.binary import FBXFile, FBXNode
-from sceneport.scene import BlendShape, Inbetween, Mesh, Primvar
+from sceneport.scene import BlendShape, Inbetween, Mesh, Node, Primvar, Scene, Skin, Transform
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -80,3 +80,32 @@ def assert_blend_shapes_close(a: list[BlendShape], b: list[BlendShape], rtol: fl
         assert [i.weight for i in sa.inbetweens] == [i.weight for i in sb.inbetweens]
         for ia, ib in zip(sa.inbetweens, sb.inbetweens):
             np.testing.assert_allclose(ia.offsets, ib.offsets, rtol=rtol)
+
+
+def rig_scene(shared_parent: bool = False) -> Scene:
+    """A strip along X skinned to a 3-joint chain (root -> mid -> tip), with a helper
+    attached to `mid` and a blend shape. The mesh node is offset, so geom_bind isn't identity."""
+    xs = np.repeat([0.0, 1.0, 2.0], 2)
+    vertices = np.stack([xs, np.tile([0.0, 1.0], 3), np.zeros(6)], axis=1)
+    mesh = Mesh("Strip", vertices, [4, 4], [0, 2, 3, 1, 2, 4, 5, 3])
+    mesh.blend_shapes = [BlendShape("Lift", [[0, 0, 1], [0, 0, 1]], indices=[4, 5], weight=0.5)]
+
+    root = Node("root", Transform(translation=[0, 0, 0]), joint=True)
+    mid = root.add(Node("mid", Transform(translation=[1, 0, 0]), joint=True))
+    mid.add(Node("tip.end", Transform(translation=[1, 0, 0]), joint=True))
+    mid.add(Node("helper", Transform(translation=[0, 2, 0], rotation=[0, 0, 30])))
+    mesh_node = Node("strip", Transform(translation=[0, 0, 0.5]), mesh=mesh)
+
+    # Bind = rest pose; the mesh node is offset by 0.5 in Z.
+    joints = [mid, root]  # skin order differs from hierarchy order on purpose
+    bind = np.stack([Transform(translation=[1, 0, 0]).matrix(), np.eye(4)])
+    mesh.skin = Skin(
+        joints,
+        joint_indices=[[1, 0], [1, 0], [1, 0], [1, 0], [0, 1], [0, 1]],
+        joint_weights=[[1, 0], [1, 0], [0.5, 0.5], [0.5, 0.5], [1, 0], [1, 0]],
+        inverse_bind=np.linalg.inv(bind),
+        geom_bind=mesh_node.transform.matrix(),
+    )
+    if shared_parent:
+        return Scene(nodes=[Node("character", children=[root, mesh_node])])
+    return Scene(nodes=[root, mesh_node])

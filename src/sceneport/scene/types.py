@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Iterator, Literal
+from typing import TYPE_CHECKING, Any, Iterator, Literal
 
 import numpy as np
 from numpy.typing import NDArray
 
-from ..math import euler_matrix, scale_matrix, translation_matrix
+from ..math import euler_matrix, quaternion_matrix, scale_matrix, translation_matrix
+
+if TYPE_CHECKING:
+    from .animation import Animation
 
 # USD primvar interpolation names; see interop/fbx/layers.py for the FBX mapping modes.
 Interpolation = Literal["vertex", "faceVarying", "uniform", "constant"]
@@ -350,22 +353,24 @@ class Transform:
             if name != "rotation_order":
                 setattr(self, name, np.asarray(getattr(self, name), dtype=np.float64).reshape(3))
 
-    def matrix(self) -> NDArray[np.float64]:
-        """4x4 local matrix (column vectors)."""
+    def matrix(self, translation=None, rotation=None, scale=None, orientation=None) -> NDArray[np.float64]:
+        """4x4 local matrix (column vectors).
+
+        The keyword arguments replace the stored translation / Euler rotation / scale,
+        e.g. with animated values; an (F, 3) array gives (F, 4, 4) matrices. A unit
+        quaternion `orientation` (w, x, y, z), possibly (F, 4), replaces the Euler
+        rotation term; pre/post rotation still apply.
+        """
+        translation = self.translation if translation is None else translation
+        scale = self.scale if scale is None else scale
+        if orientation is not None:
+            rotate = quaternion_matrix(orientation)
+        else:
+            rotate = euler_matrix(self.rotation if rotation is None else rotation, self.rotation_order)
         rp, sp = translation_matrix(self.rotation_pivot), translation_matrix(self.scaling_pivot)
-        return (
-            translation_matrix(self.translation)
-            @ translation_matrix(self.rotation_offset)
-            @ rp
-            @ euler_matrix(self.pre_rotation)
-            @ euler_matrix(self.rotation, self.rotation_order)
-            @ np.linalg.inv(euler_matrix(self.post_rotation))
-            @ np.linalg.inv(rp)
-            @ translation_matrix(self.scaling_offset)
-            @ sp
-            @ scale_matrix(self.scale)
-            @ np.linalg.inv(sp)
-        )
+        before = translation_matrix(self.rotation_offset) @ rp @ euler_matrix(self.pre_rotation)
+        after = np.linalg.inv(euler_matrix(self.post_rotation)) @ np.linalg.inv(rp) @ translation_matrix(self.scaling_offset) @ sp
+        return translation_matrix(translation) @ before @ rotate @ after @ scale_matrix(scale) @ np.linalg.inv(sp)
 
     def geometric_matrix(self) -> NDArray[np.float64]:
         return (
@@ -460,6 +465,7 @@ class Scene:
     right_axis: str = "+X"
     # Format-specific data kept for round trips, keyed by format, e.g. extras["fbx"].
     extras: dict[str, Any] = field(default_factory=dict)
+    animations: list[Animation] = field(default_factory=list)  # clips, see scene/animation.py
 
     def __post_init__(self):
         for name in ("up_axis", "front_axis", "right_axis"):
