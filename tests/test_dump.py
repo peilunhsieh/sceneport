@@ -68,5 +68,5 @@ def test_cli_convert(tmp_path, capsys):
     assert [c.name for c in back.animations] == ["wave"] and back.meshes[0].skin is not None
 
     with pytest.raises(SystemExit) as e:
-        main(["convert", str(tmp_path / "rig.fbx"), str(tmp_path / "rig.obj")])
-    assert "unsupported file extension '.obj'" in str(e.value)
+        main(["convert", str(tmp_path / "rig.fbx"), str(tmp_path / "rig.stl")])
+    assert "unsupported file extension '.stl'" in str(e.value)

@@ -44,7 +44,7 @@ def main(argv: list[str] | None = None) -> None:
     dump.add_argument("--full", action="store_true", help="show all array items")
     dump.set_defaults(func=_dump)
 
-    convert = sub.add_parser("convert", help="convert between formats: .fbx, .usd, .usda, .usdc, .usdz")
+    convert = sub.add_parser("convert", help="convert between formats: .fbx, .usd, .usda, .usdc, .usdz, .obj, .ply")
     convert.add_argument("input")
     convert.add_argument("output", help="the format follows the extension")
     convert.set_defaults(func=_convert)

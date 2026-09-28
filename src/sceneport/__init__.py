@@ -9,9 +9,9 @@ from .scene import AXES, Animation, BlendShape, Channel, Inbetween, Mesh, Node, 
 
 
 def _formats():
-    from .interop import fbx, usd
+    from .interop import fbx, obj, ply, usd
 
-    return {".fbx": fbx, **{ext: usd for ext in usd.EXTENSIONS}}
+    return {".fbx": fbx, **{ext: usd for ext in usd.EXTENSIONS}, ".obj": obj, ".ply": ply}
 
 
 def load(path: str | os.PathLike) -> Scene:

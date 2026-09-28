@@ -12,6 +12,7 @@ a converter around it:
 | `sceneport.scene` | Plain numpy data classes: Scene, Node, Mesh, Primvar, Transform |
 | `sceneport.interop.fbx` | Native FBX read/write |
 | `sceneport.interop.usd` | USD read/write (`.usd`, `.usda`, `.usdc`, `.usdz`) via usd-core |
+| `sceneport.interop.obj`, `sceneport.interop.ply` | OBJ and PLY read/write (geometry only) |
 | `sceneport.interop.trimesh` | Conversion to and from trimesh |
 
 The FBX support follows Blender's
@@ -108,11 +109,17 @@ scene = sceneport.load("model.usd")  # composed stage: references, payloads, ins
 
 ```bash
 sceneport convert model.fbx model.usd   # the formats follow the extensions
-sceneport convert model.usdz model.fbx  # .fbx, .usd, .usda, .usdc, .usdz
+sceneport convert model.usdz model.fbx  # .fbx, .usd, .usda, .usdc, .usdz, .obj, .ply
+sceneport convert scan.ply scan.usd
 ```
 
-Meshes, blend shapes, skins and animation carry over (see the conventions
-below for what each format can hold).
+Meshes, blend shapes, skins and animation carry over between FBX and USD.
+For PLY, `sceneport.save(scene, "x.ply", uvs="vertex")` writes per-vertex UVs
+that Blender reads (splitting vertices at UV seams); the default per-corner UVs
+are lossless but only MeshLab-style readers see them; `uvs=None` leaves UVs out.
+OBJ and PLY hold geometry only: meshes are written in world space as currently
+posed (blend shapes at their default weights), with a warning about what is
+dropped. See the conventions below for what each format can hold.
 
 ## Inspecting files
 
@@ -171,7 +178,7 @@ The reasoning behind these is in
 
 
 - `load`/`save` pick the format from the file extension (`.fbx`, `.usd`, `.usda`,
-  `.usdc`, `.usdz`).
+  `.usdc`, `.usdz`, `.obj`, `.ply`).
 - `Scene.meters_per_unit` and `up_axis`/`front_axis`/`right_axis` (signed names
   like `"+Y"`) describe the data; nothing is converted on load or save. New
   scenes default to meters, Y up.

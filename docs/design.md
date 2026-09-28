@@ -66,6 +66,29 @@ future changes can keep them consistent (or revisit them deliberately).
   splits vertices at seams by default, or keeps them one-to-one
   (`split_seams=False`) when vertex order matters.
 
+## OBJ and PLY
+
+- Native readers and writers (not trimesh, which triangulates and splits
+  vertices at UV seams). Both keep polygons of any size, vertex order and
+  per-corner UVs: OBJ through `vt` plus `f v/vt/vn` indices (written in our
+  indexed form directly), PLY through a per-face `texcoord` list (the MeshLab
+  convention). PLY also reads per-vertex `s`/`t` UVs.
+- Geometry only. Writers bake each mesh into world space as currently posed
+  (skinned by the scene's joints, blend shapes at default weights) — what
+  Blender's exporters do — and warn about dropped skins, blend shapes and
+  animation. No axis conversion: coordinates are written as they are.
+- OBJ: one `o` group per mesh node (read back as one node each; `g` groups when
+  a file has no `o`); one UV set; normals come back per vertex when they are
+  indexed like the vertices. Text with 9 significant digits by default (exact
+  for float32; `precision=17` for float64).
+- PLY: one mesh per file, so meshes are joined. PLY has no standard for UVs:
+  `uvs="corner"` (default) writes MeshLab's per-face `texcoord` lists, lossless
+  but ignored by Blender (per-corner normals are averaged per vertex);
+  `uvs="vertex"` writes per-vertex `s`/`t` like Blender's exporter, splitting
+  vertices at UV/normal seams (vertex count and order change, with a warning);
+  `uvs=None` writes no UVs. Binary little-endian by default (`ascii=True`), float32
+  coordinates by default (`double=True`).
+
 ## Names
 
 - USD prim names must be identifiers: names are made valid and unique

@@ -58,7 +58,7 @@ def test_invalid_axis():
 
 
 def test_unsupported_extension(tmp_path):
-    with pytest.raises(ValueError, match="unsupported file extension '.obj'"):
-        sceneport.load(tmp_path / "x.obj")
+    with pytest.raises(ValueError, match="unsupported file extension '.stl'"):
+        sceneport.load(tmp_path / "x.stl")
     with pytest.raises(ValueError, match="unsupported"):
         sceneport.save(Scene(), tmp_path / "x.blend")
