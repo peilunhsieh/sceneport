@@ -13,17 +13,21 @@ from .animation import fps_from_settings, read_animations
 from .blendshapes import read_blend_shapes
 from .binary import read
 from .document import FBXDocument, FBXObject
+from .materials import read_material_indices, read_material_slots, read_materials
 from .settings import read_global_settings
 from .skin import JOINT_SUBTYPES, read_skin
 
 
 def load(path: str | os.PathLike) -> Scene:
-    return scene_from_document(FBXDocument.from_file(read(path)))
+    return scene_from_document(FBXDocument.from_file(read(path)), os.path.dirname(os.path.abspath(path)))
 
 
-def scene_from_document(doc: FBXDocument) -> Scene:
+def scene_from_document(doc: FBXDocument, directory: str | None = None) -> Scene:
+    """`directory` (the FBX file's folder) resolves relative texture paths."""
     scene = Scene()
     read_global_settings(doc.global_settings, scene)
+    materials = read_materials(doc, directory)
+    scene.materials = list(materials.values())
     meshes: dict[int, Mesh] = {}  # geometry id -> Mesh, so shared geometry stays shared
     nodes: dict[int, Node] = {}
     shapes: dict[int, tuple[Mesh, str]] = {}  # BlendShapeChannel id -> (mesh, shape name)
@@ -38,10 +42,12 @@ def scene_from_document(doc: FBXDocument) -> Scene:
                 continue
             if geom.id not in meshes:
                 mesh = meshes[geom.id] = mesh_from_geometry(geom)
+                mesh.material_indices = read_material_indices(geom, mesh.n_faces)
                 channels: dict[int, str] = {}
                 mesh.blend_shapes = read_blend_shapes(doc, geom, mesh.n_vertices, channels)
                 shapes.update((cid, (mesh, name)) for cid, name in channels.items())
             node.mesh = meshes[geom.id]
+            node.materials = read_material_slots(doc, model, materials)
             break
 
     for model in models:

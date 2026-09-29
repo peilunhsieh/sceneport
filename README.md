@@ -9,8 +9,8 @@ a converter around it:
 
 | Package | Responsibility |
 |---|---|
-| `sceneport.scene` | Plain numpy data classes: Scene, Node, Mesh, Primvar, Transform |
-| `sceneport.interop.fbx` | Native FBX read/write |
+| `sceneport.scene` | Plain numpy data classes: Scene, Node, Mesh, Primvar, Transform, Material |
+| `sceneport.interop.fbx` | Native FBX read/write (materials: read only) |
 | `sceneport.interop.usd` | USD read/write (`.usd`, `.usda`, `.usdc`, `.usdz`) via usd-core |
 | `sceneport.interop.obj`, `sceneport.interop.ply` | OBJ and PLY read/write (geometry only) |
 | `sceneport.interop.trimesh` | Conversion to and from trimesh |
@@ -60,6 +60,14 @@ times = clip.frame_times()               # one per frame at clip.fps
 clip.skinned_vertices(scene, mesh, times)  # (F, N, 3)
 clip.world_matrices(scene, times)        # {node: (F, 4, 4)}
 
+# Materials (read from USD and FBX): generic shading node graphs
+node.materials                           # the node's material slots
+mesh.material_indices                    # (F,) slot of each face, or None = slot 0
+material = node.materials[0]
+surface = material.surface()             # e.g. the UsdPreviewSurface node; surface("mtlx") for MaterialX
+source, output, port = material.trace(surface.inputs["diffuseColor"])  # e.g. a UsdUVTexture, "outputs:rgb"
+source.inputs["file"].value              # AssetPath("tex/wood.png", resolved=...)
+
 sceneport.save(scene, "out.fbx")
 ```
 
@@ -104,6 +112,9 @@ scene = sceneport.load("model.usd")  # composed stage: references, payloads, ins
   joints are written under the Skeleton, placed at their joint's rest pose, and
   re-attached on load. When a skinned mesh and its skeleton share no ancestor,
   a SkelRoot is generated around them and dropped again on load.
+- Materials are read (not yet written) as generic UsdShade graphs, whatever
+  the node library (UsdPreviewSurface, MaterialX, renderer-specific).
+  `materialBind` GeomSubsets become per-face material slots.
 
 ## Converting files
 
@@ -167,7 +178,7 @@ must round-trip byte-exactly.
 - [x] Phase 1 — static mesh (vertices, polygons, normals, UVs), trimesh conversion
 - [x] Phase 1b — USD read/write for everything in Phase 1
 - [x] Phase 2 — blend shapes (with in-betweens), FBX and USD
-- [ ] Phase 3 — materials / textures
+- [ ] Phase 3 — materials / textures (reading USD and FBX done)
 - [x] Phase 4 — skeleton / skinning (linear blend skinning), FBX and USD
 - [x] Phase 5 — animation (keyframes, joints/nodes/blend shape weights), FBX and USD
 

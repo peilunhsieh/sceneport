@@ -150,6 +150,40 @@ future changes can keep them consistent (or revisit them deliberately).
   common SkelRoot (their nearest shared ancestor, or a generated wrapper that
   is dropped again on load). Only linear blend skinning is supported.
 
+## Materials
+
+- **Generic node graphs first.** A `Material` holds `ShaderNode`s and
+  `NodeGraph`s keyed by their path relative to the material, an interface
+  (`inputs`) and `outputs` per render context (`surface`, `mtlx:surface`,
+  `ri:surface`, ...), following UsdShade. Nodes keep their identity as authored
+  (`shader_id` such as `UsdPreviewSurface` or `ND_standard_surface_surfaceshader`,
+  or source assets / inline code per source type), so any node library is read
+  without knowing what its nodes mean, and nothing is lost.
+- `Port`: USD value type name, value (Python scalars/str, `AssetPath`, float64
+  arrays), connections (`Connection(node, "outputs:x" | "inputs:x")`, node ""
+  = the material's interface) and color space. `Material.trace` follows
+  connections through node graph and material interfaces to the producing
+  shader output or value; `Material.surface(context)` finds the surface shader.
+- **Slots, like FBX and Blender:** `Node.materials` lists the node's material
+  slots and `Mesh.material_indices` gives each face's slot (None = slot 0).
+  Keeping slots on the node lets instances of one mesh use different materials.
+  `Scene.materials` lists every material, bound or not.
+- USD: bindings are resolved with UsdShade (inheritance, collections). Each
+  `materialBind` GeomSubset becomes a slot, in order; faces in no subset get one
+  more slot with the mesh's own binding.
+- FBX: a Material has no graph, just Properties70, so it becomes a Material
+  with one `Surface` node (`FbxSurfacePhong` / `FbxSurfaceLambert` /
+  `FbxSurfaceMaterial`) whose inputs are the effective properties (object over
+  template, any exporter-specific ones included). Textures connected to a
+  property become `FbxFileTexture` / `FbxLayeredTexture` nodes connected to that
+  input, so `trace` works as for USD. File paths come from RelativeFilename /
+  FileName (resolved next to the FBX file); embedded Video content is kept as
+  bytes in the texture node's `extras["fbx"]["content"]`. Slots are the Model's
+  connected materials in order; `LayerElementMaterial` gives per-polygon slots.
+- Only reading is implemented; writers warn that materials are dropped.
+  Interpreting graphs (e.g. UsdPreviewSurface or FBX Phong to a simple PBR
+  description) comes next.
+
 ## Animation
 
 - **Keyframes, not baked samples.** `Scene.animations` holds clips

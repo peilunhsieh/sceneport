@@ -12,6 +12,7 @@ from ..math import euler_matrix, quaternion_matrix, scale_matrix, translation_ma
 
 if TYPE_CHECKING:
     from .animation import Animation
+    from .material import Material
 
 # USD primvar interpolation names; see interop/fbx/layers.py for the FBX mapping modes.
 Interpolation = Literal["vertex", "faceVarying", "uniform", "constant"]
@@ -121,11 +122,15 @@ class Mesh:
     uvs: dict[str, Primvar] = field(default_factory=dict)
     blend_shapes: list[BlendShape] = field(default_factory=list)
     skin: Skin | None = None
+    # (F,) material slot of each face, an index into the node's `materials`; None = every face uses slot 0.
+    material_indices: NDArray[np.int32] | None = None
 
     def __post_init__(self):
         self.vertices = np.asarray(self.vertices, dtype=np.float64).reshape(-1, 3)
         self.face_vertex_counts = np.asarray(self.face_vertex_counts, dtype=np.int32)
         self.face_vertex_indices = np.asarray(self.face_vertex_indices, dtype=np.int32)
+        if self.material_indices is not None:
+            self.material_indices = np.asarray(self.material_indices, dtype=np.int32)
 
     def deformed_vertices(self, weights: dict[str, float] | NDArray | None = None) -> NDArray[np.float64]:
         """Vertices with blend shapes applied.
@@ -305,6 +310,11 @@ class Mesh:
                 raise ValueError(f"{label}: joint index out of range")
             if skin.inverse_bind.shape != (len(skin.joints), 4, 4):
                 raise ValueError(f"{label}: inverse_bind must be (J, 4, 4) with J = {len(skin.joints)}")
+        if self.material_indices is not None:
+            if self.material_indices.shape != (self.n_faces,):
+                raise ValueError(f"mesh {self.name!r}: material_indices must be (F,) with F = {self.n_faces}")
+            if self.n_faces and self.material_indices.min() < 0:
+                raise ValueError(f"mesh {self.name!r}: negative material index")
 
 
 # Transform field -> FBX Model property. Rotations, pivots and offsets are Vector3D.
@@ -393,6 +403,8 @@ class Node:
     mesh: Mesh | None = None
     children: list[Node] = field(default_factory=list)
     joint: bool = False
+    # Material slots of the node's mesh (FBX and Blender keep them per object); see Mesh.material_indices.
+    materials: list[Material | None] = field(default_factory=list)
     # Format-specific data kept for round trips, keyed by format, e.g. extras["fbx"].
     extras: dict[str, Any] = field(default_factory=dict)
 
@@ -466,6 +478,7 @@ class Scene:
     # Format-specific data kept for round trips, keyed by format, e.g. extras["fbx"].
     extras: dict[str, Any] = field(default_factory=dict)
     animations: list[Animation] = field(default_factory=list)  # clips, see scene/animation.py
+    materials: list[Material] = field(default_factory=list)  # every material, bound or not; see scene/material.py
 
     def __post_init__(self):
         for name in ("up_axis", "front_axis", "right_axis"):

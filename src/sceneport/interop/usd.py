@@ -28,6 +28,12 @@ usd-core. Xformable prims become Nodes; other prims (Scope, Material, ...) are
 flattened away. Transform stacks that match the one written here are read
 exactly; others (and joint rest matrices) are decomposed from matrices.
 
+Materials (read only, for now): every UsdShade Material becomes a generic
+Material graph (shaders, node graphs, port values and connections, whatever the
+node library). A mesh's bound material (resolved like USD does: inherited,
+collection and purpose-less bindings) and its "materialBind" GeomSubsets become
+the node's material slots and the mesh's per-face material_indices.
+
 USD only records the up axis (Y or Z); front and right axes are implied
 (+Z/+X for Y up, -Y/+X for Z up). Points and weights are stored as float32.
 """
@@ -42,7 +48,7 @@ from pathlib import Path
 
 import numpy as np
 from numpy.typing import NDArray
-from pxr import Gf, Sdf, Tf, Usd, UsdGeom, UsdSkel, UsdUtils, Vt
+from pxr import Gf, Sdf, Tf, Usd, UsdGeom, UsdShade, UsdSkel, UsdUtils, Vt
 
 from ..math import (
     ROTATION_ORDERS,
@@ -53,6 +59,7 @@ from ..math import (
     quaternion_matrix,
 )
 from ..scene.animation import Animation, Channel, rest_value
+from ..scene.material import AssetPath, Connection, Material, NodeGraph, Port, ShaderNode
 from ..scene.types import BlendShape, Inbetween, Mesh, Node, Primvar, Scene, Skin, Transform
 
 EXTENSIONS = (".usd", ".usda", ".usdc", ".usdz")
@@ -101,6 +108,8 @@ def load(path: str | os.PathLike) -> Scene:
 
 def save(scene: Scene, path: str | os.PathLike) -> None:
     path = Path(path)
+    if scene.materials or any(node.materials for node, _ in scene.walk()):
+        warnings.warn("materials are not written to USD yet")
     stage = stage_from_scene(scene)
     if path.suffix.lower() == ".usdz":
         with tempfile.TemporaryDirectory() as tmp:
@@ -592,11 +601,16 @@ class _Reader:
         self.bound_shapes: dict[Sdf.Path, list[tuple[Mesh, dict[str, str]]]] = {}
         self.node_channels: list[Channel] = []  # time-sampled xformOps: the timeline's clip
         self.fps = 24.0
+        self.materials: dict[Sdf.Path, Material] = {}
 
     def read(self, stage: Usd.Stage, scene: Scene) -> None:
         self.fps = stage.GetTimeCodesPerSecond()
+        for prim in stage.Traverse(_PREDICATE):  # every material, in stage order; bound ones are shared from here
+            if prim.IsA(UsdShade.Material):
+                self.get_material(prim)
         for prim in stage.GetPseudoRoot().GetFilteredChildren(_PREDICATE):
             self.read_prim(prim, scene.nodes)
+        scene.materials = list(self.materials.values())
         for mesh, prim in self.pending_skins:  # after all skeletons are known
             mesh.skin = self.read_skin(prim, mesh)
         scene.animations = self.read_animations(stage)
@@ -617,11 +631,13 @@ class _Reader:
         self.read_node_samples(UsdGeom.Xformable(prim), node)
         if prim.IsA(UsdGeom.Mesh):
             node.mesh = self.get_mesh(prim)
+            node.materials = self.read_material_slots(prim, node.mesh)
         else:
             # A leaf Mesh child is the node's own geometry, with its transform as the geometric transform.
             for child in children:
                 if child.IsA(UsdGeom.Mesh) and not _xformable_children(child):
                     node.mesh = self.get_mesh(child)
+                    node.materials = self.read_material_slots(child, node.mesh)
                     _set_geometric(node.transform, _read_transform(UsdGeom.Xformable(child)))
                     children.remove(child)
                     break
@@ -691,6 +707,38 @@ class _Reader:
         if skeleton and mesh.blend_shapes:
             self.bound_shapes.setdefault(skeleton.GetPath(), []).append((mesh, _shape_token_names(prim)))
         return mesh
+
+    def get_material(self, prim: Usd.Prim) -> Material:
+        if prim.GetPath() not in self.materials:
+            self.materials[prim.GetPath()] = _read_material(prim)
+        return self.materials[prim.GetPath()]
+
+    def bound_material(self, prim: Usd.Prim) -> Material | None:
+        material, _ = UsdShade.MaterialBindingAPI(prim).ComputeBoundMaterial()
+        return self.get_material(material.GetPrim()) if material else None
+
+    def read_material_slots(self, prim: Usd.Prim, mesh: Mesh) -> list[Material | None]:
+        """The node's material slots: one per materialBind GeomSubset, plus the mesh's own binding for other faces.
+
+        Sets `mesh.material_indices` when there are subsets (a shared mesh keeps the first ones read).
+        """
+        whole = self.bound_material(prim)
+        subsets = [s for s in UsdShade.MaterialBindingAPI(prim).GetMaterialBindSubsets()
+                   if s.GetElementTypeAttr().Get() == UsdGeom.Tokens.face]  # fmt: skip
+        if not subsets:
+            return [whole] if whole is not None else []
+        slots: list[Material | None] = []
+        indices = np.full(mesh.n_faces, -1, dtype=np.int32)
+        for subset in subsets:
+            faces = _array(subset.GetIndicesAttr().Get(_TIME), np.int64)
+            indices[faces[(faces >= 0) & (faces < mesh.n_faces)]] = len(slots)
+            slots.append(self.bound_material(subset.GetPrim()))
+        if (indices < 0).any():  # faces in no subset use the mesh's own binding
+            indices[indices < 0] = len(slots)
+            slots.append(whole)
+        if mesh.material_indices is None:
+            mesh.material_indices = indices
+        return slots
 
     def read_node_samples(self, xf: UsdGeom.Xformable, node: Node) -> None:
         """Channels for time-sampled xformOps (translate / rotate / scale; else the decomposed matrix)."""
@@ -806,6 +854,80 @@ class _Reader:
         geom_bind = np.array(geom_attr.Get()).T if geom_attr.HasAuthoredValue() else np.eye(4)
         inverse_bind = np.linalg.inv(np.stack([bind_by_token[t] for t in order]))
         return Skin([by_token[t] for t in order], joint_indices, joint_weights, inverse_bind, geom_bind)
+
+
+def _read_material(prim: Usd.Prim) -> Material:
+    """A Material prim as a generic graph: every Shader and NodeGraph below it, with ports and connections."""
+    root = prim.GetPath()
+    inputs, outputs = _read_ports(UsdShade.ConnectableAPI(prim), root)
+    material = Material(_display_name(prim), inputs=inputs, outputs=outputs)
+    for child in Usd.PrimRange(prim, _PREDICATE):
+        if child == prim:
+            continue
+        path = str(child.GetPath().MakeRelativePath(root))
+        if child.IsA(UsdShade.Shader):
+            inputs, outputs = _read_ports(UsdShade.ConnectableAPI(child), root)
+            node = ShaderNode(path, inputs=inputs, outputs=outputs)
+            _read_shader_info(UsdShade.Shader(child), node)
+            material.nodes[path] = node
+        elif child.IsA(UsdShade.NodeGraph):  # also a Material nested in a Material
+            inputs, outputs = _read_ports(UsdShade.ConnectableAPI(child), root)
+            material.nodes[path] = NodeGraph(path, inputs=inputs, outputs=outputs)
+    return material
+
+
+def _read_shader_info(shader: UsdShade.Shader, node: ShaderNode) -> None:
+    if (value := shader.GetIdAttr().Get()) is not None:
+        node.shader_id = str(value)
+    for attr in shader.GetPrim().GetAuthoredAttributes():
+        parts = attr.GetName().split(":")  # info:<source type>:sourceAsset / sourceCode
+        if len(parts) != 3 or parts[0] != "info" or (value := attr.Get()) is None:
+            continue
+        if parts[2] == "sourceAsset":
+            node.source_assets[parts[1]] = _shade_value(value)
+        elif parts[2] == "sourceCode":
+            node.source_code[parts[1]] = str(value)
+    source = shader.GetImplementationSourceAttr()
+    if source.HasAuthoredValue() and source.Get() != UsdShade.Tokens.id:
+        node.extras["usd"] = {"implementationSource": str(source.Get())}
+
+
+def _read_ports(api: UsdShade.ConnectableAPI, root: Sdf.Path) -> tuple[dict[str, Port], dict[str, Port]]:
+    """(inputs, outputs) of a shader, node graph or material; connections relative to the material at `root`."""
+    ports = []
+    for group in (api.GetInputs(), api.GetOutputs()):
+        out = {}
+        for port in group:
+            attr = port.GetAttr()
+            connections = []
+            for source in attr.GetConnections():
+                owner = source.GetPrimPath()
+                node = str(owner.MakeRelativePath(root)) if owner.HasPrefix(root) else str(owner)
+                connections.append(Connection("" if node == "." else node, source.name))
+            out[str(port.GetBaseName())] = Port(
+                str(port.GetTypeName()),
+                _shade_value(_static_value(attr)) if attr.HasAuthoredValue() else None,
+                connections,
+                str(attr.GetColorSpace()) if attr.HasColorSpace() else None,
+            )
+        ports.append(out)
+    return ports[0], ports[1]
+
+
+def _shade_value(value):
+    """A port value as plain Python: scalars and str as they are, AssetPath for files, float64 arrays for the rest."""
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, Sdf.AssetPath):
+        return AssetPath(value.path, value.resolvedPath or None)
+    if isinstance(value, Sdf.AssetPathArray):
+        return [AssetPath(v.path, v.resolvedPath or None) for v in value]
+    if isinstance(value, (Gf.Quatd, Gf.Quatf, Gf.Quath)):
+        return np.array([value.GetReal(), *value.GetImaginary()], dtype=np.float64)  # w, x, y, z
+    array = np.array(value)
+    if array.dtype.kind == "f":
+        return array.astype(np.float64)
+    return array if array.dtype.kind in "iub" else array.tolist()
 
 
 def _parent_token(token: str) -> str:

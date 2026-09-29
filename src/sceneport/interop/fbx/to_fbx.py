@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import warnings
 
 import numpy as np
 
@@ -18,6 +19,8 @@ from .skin import write_bind_pose, write_skin
 
 
 def save(scene: Scene, path: str | os.PathLike, *, version: int = 7400) -> None:
+    if scene.materials or any(node.materials for node, _ in scene.walk()):
+        warnings.warn("materials are not written to FBX yet")
     write(document_from_scene(scene, version=version).to_file(), path)
 
 

@@ -5,7 +5,10 @@ __version__ = "0.1.0"
 import os  # noqa: E402
 from pathlib import Path  # noqa: E402
 
-from .scene import AXES, Animation, BlendShape, Channel, Inbetween, Mesh, Node, Primvar, Scene, Skin, Transform  # noqa: E402
+from .scene import (  # noqa: E402
+    AXES, Animation, AssetPath, BlendShape, Channel, Connection, Inbetween, Material, Mesh, Node, NodeGraph, Port,
+    Primvar, Scene, ShaderNode, Skin, Transform,
+)  # fmt: skip
 
 
 def _formats():
@@ -32,4 +35,7 @@ def _format_for(path: str | os.PathLike):
     return formats[suffix]
 
 
-__all__ = ["Scene", "Node", "Mesh", "Primvar", "Transform", "BlendShape", "Inbetween", "Skin", "Animation", "Channel", "AXES", "load", "save"]
+__all__ = [
+    "Scene", "Node", "Mesh", "Primvar", "Transform", "BlendShape", "Inbetween", "Skin", "Animation", "Channel",
+    "Material", "ShaderNode", "NodeGraph", "Port", "Connection", "AssetPath", "AXES", "load", "save",
+]
