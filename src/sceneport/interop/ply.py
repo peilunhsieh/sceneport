@@ -1,7 +1,7 @@
 """Read and write PLY (Stanford polygon format; geometry only).
 
 Writing: one mesh per file, so several meshes are joined (world space, like
-Blender's exporter), with a warning. Binary little-endian by default
+Blender's exporter, in meters unless `meters_per_unit` says otherwise), with a warning. Binary little-endian by default
 (`ascii=True` for text), float32 coordinates (`double=True` for float64).
 Vertices carry x/y/z and per-vertex normals; faces carry `vertex_indices`.
 UVs (`uvs=`):
@@ -29,7 +29,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from ..scene.types import Mesh, Node, Primvar, Scene
-from .export import mesh_in_world, warn_dropped
+from .export import mesh_in_world, unit_scale, warn_dropped
 
 _TYPES = {
     "char": "i1", "int8": "i1", "uchar": "u1", "uint8": "u1",
@@ -44,12 +44,20 @@ _UV_NAMES = (("s", "t"), ("u", "v"), ("texture_u", "texture_v"), ("texture_s", "
 
 
 def save(
-    scene: Scene, path: str | os.PathLike, *, ascii: bool = False, double: bool = False, uvs: str | None = "corner"
+    scene: Scene,
+    path: str | os.PathLike,
+    *,
+    ascii: bool = False,
+    double: bool = False,
+    uvs: str | None = "corner",
+    meters_per_unit: float | None = 1.0,
 ) -> None:
+    """Write `scene` as one PLY mesh. PLY has no units: coordinates are converted to
+    `meters_per_unit` (default meters); None writes the scene's own units."""
     if uvs not in ("corner", "vertex", None):
         raise ValueError(f'uvs must be "corner", "vertex" or None, got {uvs!r}')
     warn_dropped(scene, "PLY")
-    parts = list(mesh_in_world(scene))
+    parts = list(mesh_in_world(scene, unit_scale(scene, meters_per_unit)))
     if not parts:
         raise ValueError("PLY needs at least one mesh")
     if len(parts) > 1:

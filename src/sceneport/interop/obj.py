@@ -1,7 +1,7 @@
 """Read and write Wavefront OBJ (geometry, with materials in MTL files).
 
 Writing: one `o` group per mesh node, with vertices in world space (like
-Blender's exporter). Skinned meshes are written as posed by the scene's current
+Blender's exporter), in meters unless `meters_per_unit` says otherwise. Skinned meshes are written as posed by the scene's current
 joint transforms and blend shapes at their default weights; skins, blend shapes
 and animation themselves can't be stored (a warning says so). Polygons keep
 their size; normals (`vn`) and the first UV set (`vt`) keep their indexed,
@@ -33,15 +33,24 @@ from numpy.typing import NDArray
 
 from ..scene.types import Mesh, Node, Primvar, Scene
 from ..scene.material import Material
-from .export import mesh_in_world, warn_dropped
+from .export import mesh_in_world, unit_scale, warn_dropped
 from .mtl import load_library, material_block
 
 
 def save(
-    scene: Scene, path: str | os.PathLike, *, precision: int = 9, materials: bool = True, pbr_extensions: bool = False
+    scene: Scene,
+    path: str | os.PathLike,
+    *,
+    precision: int = 9,
+    materials: bool = True,
+    pbr_extensions: bool = False,
+    meters_per_unit: float | None = 1.0,
 ) -> None:
     """Write `scene` as OBJ, plus an MTL file when nodes have material slots.
 
+    OBJ has no units; coordinates are converted to `meters_per_unit` (default
+    meters, what Blender and most tools assume), e.g. a centimeter FBX scene is
+    scaled by 0.01. `meters_per_unit=None` writes the scene's own units.
     `precision`: significant digits (9 is exact for float32 data, 17 for float64).
     `materials=False` writes geometry only. `pbr_extensions` writes the PBR MTL
     keys (Pr, Pm, map_Pr, ...) instead of Ns / Ka / map_Ns / map_refl.
@@ -53,7 +62,7 @@ def save(
     names: dict[int, str] = {}  # id(Material) -> its unique MTL name
     used: list[Material] = []
     offsets = np.zeros(3, dtype=np.int64)  # v, vt, vn written so far (OBJ indices are global, 1-based)
-    for node, mesh, vertices, normals in mesh_in_world(scene):
+    for node, mesh, vertices, normals in mesh_in_world(scene, unit_scale(scene, meters_per_unit)):
         if len(mesh.uvs) > 1:
             warnings.warn(f"OBJ holds one UV set; {mesh.name!r} keeps {next(iter(mesh.uvs))!r} only")
         lines.append(f"o {_obj_name(node.name)}")

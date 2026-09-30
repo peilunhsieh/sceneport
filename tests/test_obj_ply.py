@@ -197,3 +197,15 @@ def test_ply_without_uvs(tmp_path):
     back = one_mesh(sceneport.load(tmp_path / "n.ply"))
     assert not back.uvs
     np.testing.assert_array_equal(back.face_vertex_indices, mesh.face_vertex_indices)  # vertices untouched
+
+
+@pytest.mark.parametrize("suffix", [".obj", ".ply"])
+def test_units_converted_to_meters(tmp_path, suffix):
+    mesh = Mesh("tri", [[0, 0, 0], [100, 0, 0], [0, 250, 0]], [3], [0, 1, 2])
+    scene = Scene(nodes=[Node("tri", mesh=mesh)], meters_per_unit=0.01)  # centimeters, like many FBX files
+    sceneport.save(scene, tmp_path / f"m{suffix}")
+    np.testing.assert_allclose(one_mesh(sceneport.load(tmp_path / f"m{suffix}")).vertices, [[0, 0, 0], [1, 0, 0], [0, 2.5, 0]])
+    sceneport.save(scene, tmp_path / f"mm{suffix}", meters_per_unit=0.001)
+    np.testing.assert_allclose(one_mesh(sceneport.load(tmp_path / f"mm{suffix}")).vertices[2], [0, 2500, 0])
+    sceneport.save(scene, tmp_path / f"raw{suffix}", meters_per_unit=None)  # the scene's own units
+    np.testing.assert_allclose(one_mesh(sceneport.load(tmp_path / f"raw{suffix}")).vertices, mesh.vertices)

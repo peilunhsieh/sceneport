@@ -31,12 +31,22 @@ def warn_dropped(scene: Scene, format_name: str, *, materials: bool = True) -> N
         warnings.warn(f"{format_name} can't hold {', '.join(dropped)}; they are not written (meshes are baked as posed)")
 
 
-def mesh_in_world(scene: Scene) -> Iterator[tuple[Node, Mesh, NDArray, Primvar | None]]:
+def unit_scale(scene: Scene, meters_per_unit: float | None) -> float:
+    """Factor from the scene's units to `meters_per_unit` (None: keep the scene's units)."""
+    if meters_per_unit is None:
+        return 1.0
+    if meters_per_unit <= 0:
+        raise ValueError(f"meters_per_unit must be positive, got {meters_per_unit}")
+    return scene.meters_per_unit / meters_per_unit
+
+
+def mesh_in_world(scene: Scene, scale: float = 1.0) -> Iterator[tuple[Node, Mesh, NDArray, Primvar | None]]:
     """(node, mesh, world-space vertices, world-space normals) for every mesh node.
 
     Blend shapes are applied at their default weights and skinned meshes are posed
     by the scene's current joint transforms. Normals are transformed by the node's
-    (or, when skinned, the bind) matrix and renormalized.
+    (or, when skinned, the bind) matrix and renormalized. Vertices are multiplied
+    by `scale` (e.g. unit_scale's factor).
     """
     world = scene.world_matrices()
     for node, matrix in world.items():
@@ -55,7 +65,7 @@ def mesh_in_world(scene: Scene) -> Iterator[tuple[Node, Mesh, NDArray, Primvar |
             values = mesh.normals.values @ inverse_transpose.T
             values /= np.maximum(np.linalg.norm(values, axis=1, keepdims=True), 1e-300)
             normals = Primvar(values, mesh.normals.interpolation, mesh.normals.indices)
-        yield node, mesh, vertices, normals
+        yield node, mesh, vertices * scale if scale != 1.0 else vertices, normals
 
 
 def texture_path(

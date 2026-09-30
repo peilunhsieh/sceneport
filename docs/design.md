@@ -76,7 +76,11 @@ future changes can keep them consistent (or revisit them deliberately).
 - Geometry (plus MTL materials for OBJ, below). Writers bake each mesh into world space as currently posed
   (skinned by the scene's joints, blend shapes at default weights) — what
   Blender's exporters do — and warn about dropped skins, blend shapes and
-  animation. No axis conversion: coordinates are written as they are.
+  animation. Neither format has units, and tools read them as meters, so
+  writers convert to meters by default (`meters_per_unit=` another unit, or
+  None for the scene's own); a centimeter FBX becomes the same size in Blender
+  whether imported as FBX or OBJ. Readers use meters (the Scene default). No
+  axis conversion: axes are written as they are.
 - OBJ: one `o` group per mesh node (read back as one node each; `g` groups when
   a file has no `o`); one UV set; normals come back per vertex when they are
   indexed like the vertices. Text with 9 significant digits by default (exact
