@@ -180,9 +180,18 @@ future changes can keep them consistent (or revisit them deliberately).
   FileName (resolved next to the FBX file); embedded Video content is kept as
   bytes in the texture node's `extras["fbx"]["content"]`. Slots are the Model's
   connected materials in order; `LayerElementMaterial` gives per-polygon slots.
+- **Interpretation is a separate layer.** `Material.pbr(context)` (scene/pbr.py)
+  reads a graph into a `PBRMaterial`: the UsdPreviewSurface / glTF
+  metallic-roughness parameters, each a value plus an optional `TextureRef`
+  (file, channels, UV set, scale/bias, UV transform, wrap, color space). It
+  understands UsdPreviewSurface, MaterialX standard_surface and OpenPBR, and
+  FBX Phong/Lambert, following textures through pass-through nodes (normal
+  map, extract/separate, convert). FBX Phong is converted as Blender's FBX
+  importer does (roughness = 1 - sqrt(shininess) / 10, metallic =
+  ReflectionFactor, its opacity rules). Anything else (math nodes, unknown
+  libraries) is skipped and listed in `notes`, so the graph stays the source of
+  truth and the PBR view is a convenience.
 - Only reading is implemented; writers warn that materials are dropped.
-  Interpreting graphs (e.g. UsdPreviewSurface or FBX Phong to a simple PBR
-  description) comes next.
 
 ## Animation
 

@@ -67,6 +67,8 @@ material = node.materials[0]
 surface = material.surface()             # e.g. the UsdPreviewSurface node; surface("mtlx") for MaterialX
 source, output, port = material.trace(surface.inputs["diffuseColor"])  # e.g. a UsdUVTexture, "outputs:rgb"
 source.inputs["file"].value              # AssetPath("tex/wood.png", resolved=...)
+pbr = material.pbr()                     # metallic-roughness view: UsdPreviewSurface, MaterialX, FBX Phong
+pbr.base_color, pbr.roughness, pbr.base_color_texture.file, pbr.notes  # notes: what was approximated or skipped
 
 sceneport.save(scene, "out.fbx")
 ```
@@ -178,7 +180,7 @@ must round-trip byte-exactly.
 - [x] Phase 1 — static mesh (vertices, polygons, normals, UVs), trimesh conversion
 - [x] Phase 1b — USD read/write for everything in Phase 1
 - [x] Phase 2 — blend shapes (with in-betweens), FBX and USD
-- [ ] Phase 3 — materials / textures (reading USD and FBX done)
+- [ ] Phase 3 — materials / textures (reading USD and FBX, PBR interpretation done)
 - [x] Phase 4 — skeleton / skinning (linear blend skinning), FBX and USD
 - [x] Phase 5 — animation (keyframes, joints/nodes/blend shape weights), FBX and USD
 

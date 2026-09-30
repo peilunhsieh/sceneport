@@ -12,7 +12,10 @@ or both (a connection wins). The material's outputs are keyed by render context
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Iterator
+from typing import TYPE_CHECKING, Any, Iterator
+
+if TYPE_CHECKING:
+    from .pbr import PBRMaterial
 
 
 @dataclass(frozen=True)
@@ -108,6 +111,8 @@ class Material:
             source = self if connection.node == "" else self.nodes.get(connection.node)
             kind, _, port_name = connection.port.partition(":")
             ports = None if source is None else {"inputs": source.inputs, "outputs": source.outputs}.get(kind)
+            if isinstance(source, ShaderNode) and kind == "outputs" and port_name not in source.outputs:
+                return source, connection.port, Port("")  # shader outputs needn't be declared (USD allows it)
             if ports is None or port_name not in ports:
                 return None, None, port
             owner, name, port = source, connection.port, ports[port_name]
@@ -123,3 +128,9 @@ class Material:
                 if isinstance(node, ShaderNode) and name and name.startswith("outputs:"):
                     return node
         return None
+
+    def pbr(self, context: str | None = None) -> PBRMaterial | None:
+        """A simple metallic-roughness description of this graph; see scene/pbr.py."""
+        from .pbr import pbr_material
+
+        return pbr_material(self, context)
