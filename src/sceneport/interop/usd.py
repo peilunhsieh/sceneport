@@ -157,12 +157,20 @@ def stage_from_scene(scene: Scene, *, directory: Path | None = None, missing_tex
 def scene_from_stage(stage: Usd.Stage) -> Scene:
     up = "+" + UsdGeom.GetStageUpAxis(stage)
     front, right = IMPLIED_AXES[up]
-    scene = Scene(meters_per_unit=UsdGeom.GetStageMetersPerUnit(stage), up_axis=up, front_axis=front, right_axis=right)
+    scene = Scene(meters_per_unit=_meters_per_unit(stage), up_axis=up, front_axis=front, right_axis=right)
     _Reader().read(stage, scene)
     return scene
 
 
 # -- writing --------------------------------------------------------------------
+
+
+def _meters_per_unit(stage: Usd.Stage) -> float:
+    """The stage's metersPerUnit, also when an old writer stored it as a float (e.g. Blender 2.80)."""
+    try:
+        return UsdGeom.GetStageMetersPerUnit(stage)
+    except Tf.ErrorException:  # "Requested type double ... does not match retrieved type float"
+        return float(stage.GetRootLayer().pseudoRoot.GetInfo("metersPerUnit"))
 
 
 def _export(stage: Usd.Stage, path: Path) -> None:

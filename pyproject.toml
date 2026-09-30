@@ -18,6 +18,9 @@ dev = [
     "pytest>=8",
 ]
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]  # also makes tests/conftest.py's --fetch-samples option available to a bare `pytest`
+
 [build-system]
 requires = ["uv_build>=0.12.17,<0.13.0"]
 build-backend = "uv_build"

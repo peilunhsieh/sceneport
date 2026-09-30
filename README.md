@@ -178,6 +178,29 @@ uv run --package sceneport --group dev pytest path/to/sceneport/tests
 Test files live in `tests/fixtures/`. `cube.fbx` was exported by Blender and
 must round-trip byte-exactly.
 
+Larger third-party sample files aren't stored in the repository. To download
+all of them (to `tests/samples/`, only those missing) and run every test:
+
+```bash
+uv run --group dev pytest --fetch-samples
+```
+
+Without `--fetch-samples`, nothing is downloaded and tests that need a missing
+sample are skipped (`-rs` shows why). The samples can also be fetched on their
+own:
+
+```bash
+uv run python tests/fetch_samples.py --list   # samples, sources and licenses
+uv run python tests/fetch_samples.py          # download all
+uv run python tests/fetch_samples.py NAME     # or only some
+```
+
+Each sample's URL and license are listed in `tests/fetch_samples.py`. A sample
+that's already there isn't downloaded again (delete it to refresh); zip samples
+are unpacked and the zip deleted. Some samples have restrictive licenses (e.g.
+Pixar's USD Asset EULA): keep them, and anything converted from them, out of
+the repository.
+
 ## Roadmap
 
 - [x] Phase 0 — binary codec, byte-exact round trip, `sceneport dump`
