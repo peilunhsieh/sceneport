@@ -28,11 +28,18 @@ usd-core. Xformable prims become Nodes; other prims (Scope, Material, ...) are
 flattened away. Transform stacks that match the one written here are read
 exactly; others (and joint rest matrices) are decomposed from matrices.
 
-Materials (read only, for now): every UsdShade Material becomes a generic
-Material graph (shaders, node graphs, port values and connections, whatever the
-node library). A mesh's bound material (resolved like USD does: inherited,
-collection and purpose-less bindings) and its "materialBind" GeomSubsets become
-the node's material slots and the mesh's per-face material_indices.
+Materials: every UsdShade Material <-> a generic Material graph (shaders, node
+graphs, port values and connections, whatever the node library). Materials are
+written under a "_materials" Scope in the first root prim; names that aren't
+valid identifiers (prims and ports) are made valid, with the original in
+displayName / customData. A graph whose surface is an FBX surface keeps it
+under outputs:fbx:surface and gets a generated UsdPreviewSurface network as
+outputs:surface. Texture files resolved on disk are referenced relative to the
+written file; textures embedded in an FBX are written to a "textures" folder.
+Reading resolves a mesh's bound material like USD does (inherited, collection
+and purpose-less bindings); "materialBind" GeomSubsets become the node's
+material slots and the mesh's per-face material_indices. Writing binds slot 0
+to the mesh, or, with material_indices, one GeomSubset per slot.
 
 USD only records the up axis (Y or Z); front and right axes are implied
 (+Z/+X for Y up, -Y/+X for Z up). Points and weights are stored as float32.
@@ -60,6 +67,8 @@ from ..math import (
 )
 from ..scene.animation import Animation, Channel, rest_value
 from ..scene.material import AssetPath, Connection, Material, NodeGraph, Port, ShaderNode
+from ..scene.pbr import FBX_SURFACES, preview_surface_nodes
+from .fbx.materials import fbx_surface, inferred_fbx_type
 from ..scene.types import BlendShape, Inbetween, Mesh, Node, Primvar, Scene, Skin, Transform
 
 EXTENSIONS = (".usd", ".usda", ".usdc", ".usdz")
@@ -68,6 +77,7 @@ JOINT_KEY = "sceneport:joint"  # customData: joint token an attachment hangs fro
 GENERATED_KEY = "sceneport:generated"  # customData: SkelRoot added only to satisfy UsdSkel
 JOINT_OP = "sceneportJoint"  # xformOp suffix placing an attachment at its joint
 ACTIVE_CLIP_KEY = "sceneport:activeClip"  # root layer customLayerData: name of the clip on the timeline
+FBX_TYPE_KEY = "sceneport:fbxType"  # customData of a shader port: its FBX [type, subtype, flags], if not the inferred one
 IMPLIED_AXES = {"+Y": ("+Z", "+X"), "+Z": ("-Y", "+X")}  # up -> (front, right)
 
 _TIME = Usd.TimeCode.EarliestTime()
@@ -108,21 +118,26 @@ def load(path: str | os.PathLike) -> Scene:
 
 def save(scene: Scene, path: str | os.PathLike) -> None:
     path = Path(path)
-    if scene.materials or any(node.materials for node, _ in scene.walk()):
-        warnings.warn("materials are not written to USD yet")
-    stage = stage_from_scene(scene)
     if path.suffix.lower() == ".usdz":
         with tempfile.TemporaryDirectory() as tmp:
+            # Textures written next to the layer get packaged; missing ones would make packaging fail.
+            stage = stage_from_scene(scene, directory=Path(tmp), missing_textures="drop")
             layer_path = Path(tmp) / f"{path.stem}.usdc"
             _export(stage, layer_path)
             if not UsdUtils.CreateNewUsdzPackage(Sdf.AssetPath(str(layer_path)), str(path)):
                 raise OSError(f"could not write {path}")
     else:
-        _export(stage, path)
+        _export(stage_from_scene(scene, directory=path.parent), path)
 
 
-def stage_from_scene(scene: Scene) -> Usd.Stage:
-    """An in-memory stage holding `scene`."""
+def stage_from_scene(scene: Scene, *, directory: Path | None = None, missing_textures: str = "keep") -> Usd.Stage:
+    """An in-memory stage holding `scene`.
+
+    `directory` is where the stage will be saved: texture paths are made relative
+    to it and embedded (FBX) textures are written to its "textures" folder.
+    Without it, texture paths are written as authored and embedded ones are dropped.
+    `missing_textures="drop"` leaves out (with a warning) texture paths that don't resolve to a file.
+    """
     if scene.up_axis not in IMPLIED_AXES:
         raise ValueError(f"USD only supports +Y or +Z up, got {scene.up_axis!r}")
     if (scene.front_axis, scene.right_axis) != IMPLIED_AXES[scene.up_axis]:
@@ -134,7 +149,7 @@ def stage_from_scene(scene: Scene) -> Usd.Stage:
     stage = Usd.Stage.CreateInMemory()
     UsdGeom.SetStageMetersPerUnit(stage, scene.meters_per_unit)
     UsdGeom.SetStageUpAxis(stage, UsdGeom.Tokens.y if scene.up_axis == "+Y" else UsdGeom.Tokens.z)
-    _Writer(stage, scene).write()
+    _Writer(stage, scene, directory, missing_textures == "drop").write()
     return stage
 
 
@@ -193,9 +208,13 @@ class _SkeletonPlan:
 
 
 class _Writer:
-    def __init__(self, stage: Usd.Stage, scene: Scene):
+    def __init__(self, stage: Usd.Stage, scene: Scene, directory: Path | None = None, drop_missing: bool = False):
         self.stage = stage
         self.scene = scene
+        self.directory = directory
+        self.drop_missing = drop_missing
+        self.material_users: list[tuple[Sdf.Path, Node, Mesh]] = []  # every mesh prim, with its node
+        self.subset_names: dict[int, list[str]] = {}  # id(Mesh) -> its GeomSubset names, shared by every user
         self.parents = scene.parents()
         self.world = scene.world_matrices()
         self.written: dict[int, Sdf.Path] = {}  # id(Mesh) -> path of its Mesh prim
@@ -286,6 +305,7 @@ class _Writer:
                 root_paths.append(path)
         if root_paths:
             self.stage.SetDefaultPrim(self.stage.GetPrimAtPath(root_paths[0]))
+        self._write_materials(root_paths[0] if root_paths else Sdf.Path.absoluteRootPath)
         self._finish()
 
     def _write_node(
@@ -316,6 +336,7 @@ class _Writer:
         if mesh is not None:
             usd_mesh = self._write_mesh_prim(path.AppendChild(_prim_name(mesh.name, child_names)), mesh)
             _write_geometric(usd_mesh, node.transform)
+            self.material_users.append((usd_mesh.GetPath(), node, mesh))
             tokens = _write_blend_shape_targets(self.stage, usd_mesh, mesh) if mesh.blend_shapes else []
             if mesh.skin is not None:
                 plan = self.plans[self._root_joint(mesh.skin.joints[0])]
@@ -334,6 +355,69 @@ class _Writer:
         for child in node.children:
             self._write_node(path, child, child_names)
         return path
+
+    def _write_materials(self, parent: Sdf.Path) -> None:
+        materials = {id(m): m for m in self.scene.materials}
+        for _, node, _ in self.material_users:
+            materials.update((id(m), m) for m in node.materials if m is not None)
+        if not materials:
+            return
+        taken = {child.GetName() for child in self.stage.GetPrimAtPath(parent).GetChildren()} if parent != Sdf.Path.absoluteRootPath else set()
+        scope = parent.AppendChild(_prim_name("_materials", taken))
+        UsdGeom.Scope.Define(self.stage, scope)
+        # The first UV set is written as "st": textures reading it by its original name must say "st".
+        first_uvs: dict[int, set[str]] = {}
+        for _, node, mesh in self.material_users:
+            if mesh.uvs:
+                for m in node.materials:
+                    first_uvs.setdefault(id(m), set()).add(next(iter(mesh.uvs)))
+        names: set[str] = set()
+        written = {
+            key: _write_material(self.stage, scope.AppendChild(_prim_name(m.name, names)), m, first_uvs.get(key, set()),
+                                 self.directory, self.drop_missing)
+            for key, m in materials.items()
+        }  # fmt: skip
+        for mesh_path, node, mesh in self.material_users:
+            prim = self.stage.GetPrimAtPath(mesh_path)
+            # A shared mesh's later prims reference the first one, bindings included: block what doesn't apply.
+            referenced = mesh_path != self.written[id(mesh)]
+            if not node.materials:
+                if referenced:
+                    self._unbind(prim, mesh)
+                continue
+            api = UsdShade.MaterialBindingAPI.Apply(prim)
+            indices = mesh.material_indices
+            if indices is None and len(node.materials) == 1:
+                if node.materials[0] is not None:
+                    api.Bind(written[id(node.materials[0])])
+                elif referenced:
+                    self._unbind(prim, mesh)
+                continue
+            if indices is None:
+                indices = np.zeros(mesh.n_faces, dtype=np.int32)
+            if id(mesh) not in self.subset_names:
+                subset_names: set[str] = set()
+                self.subset_names[id(mesh)] = [_prim_name(m.name if m is not None else f"slot{i}", subset_names)
+                                               for i, m in enumerate(node.materials)]  # fmt: skip
+            subset_names = self.subset_names[id(mesh)]
+            for i, material in enumerate(node.materials):
+                name = subset_names[i] if i < len(subset_names) else f"slot{i}"
+                faces = Vt.IntArray.FromNumpy(np.flatnonzero(indices == i).astype(np.int32))
+                subset = api.CreateMaterialBindSubset(name, faces, UsdGeom.Tokens.face)
+                subset_api = UsdShade.MaterialBindingAPI.Apply(subset.GetPrim())
+                if material is not None:
+                    subset_api.Bind(written[id(material)])
+                elif referenced:
+                    subset_api.UnbindDirectBinding()
+            api.SetMaterialBindSubsetsFamilyType(UsdGeom.Tokens.partition)
+
+    def _unbind(self, prim: Usd.Prim, mesh: Mesh) -> None:
+        """Block the bindings a referenced mesh prim brings along (on the prim and its subsets)."""
+        UsdShade.MaterialBindingAPI.Apply(prim).UnbindDirectBinding()
+        for name in self.subset_names.get(id(mesh), []):
+            subset = prim.GetChild(name)
+            if subset:
+                UsdShade.MaterialBindingAPI.Apply(subset).UnbindDirectBinding()
 
     def _write_mesh_prim(self, path: Sdf.Path, mesh: Mesh) -> UsdGeom.Mesh:
         if id(mesh) in self.written:
@@ -449,6 +533,172 @@ class _Writer:
             w_attr = animation.CreateBlendShapeWeightsAttr(Vt.FloatArray([plan.shape_weights[t] for t in tokens]))
             for f, code in enumerate(codes):
                 w_attr.Set(Vt.FloatArray.FromNumpy(np.ascontiguousarray(weights[f], dtype=np.float32)), float(code))
+
+
+def _write_material(
+    stage: Usd.Stage, path: Sdf.Path, material: Material, first_uvs: set[str], directory: Path | None,
+    drop_missing: bool = False,
+) -> UsdShade.Material:
+    """Write `material`'s graph under `path`; an FBX surface also gets a UsdPreviewSurface network (see module doc)."""
+    usd_material = UsdShade.Material.Define(stage, path)
+    _set_display_name(usd_material.GetPrim(), material.name)
+    nodes, outputs = dict(material.nodes), dict(material.outputs)
+    pbr = material.pbr() if fbx_surface(material) is not None else None
+    if pbr is not None and pbr.source in FBX_SURFACES:
+        outputs = {("fbx:surface" if key == "surface" else key): port for key, port in outputs.items()}
+        prefix = "Preview"
+        while any(p == prefix or p.startswith(prefix) for p in nodes):
+            prefix += "_"
+        preview, outputs["surface"] = preview_surface_nodes(pbr, prefix)
+        for node in preview.values():  # UV set names as written on the meshes
+            if node.shader_id == "UsdPrimvarReader_float2":
+                name = node.inputs["varname"].value
+                node.inputs["varname"].value = "st" if name in first_uvs else Tf.MakeValidIdentifier(name)
+        nodes.update(preview)
+
+    prim_paths: dict[str, Sdf.Path] = {"": path}
+    taken: dict[Sdf.Path, set[str]] = {}
+
+    def prim_path(rel: str) -> Sdf.Path:
+        if rel not in prim_paths:
+            parent_rel, _, leaf = rel.rpartition("/")
+            parent = prim_path(parent_rel)
+            prim_paths[rel] = parent.AppendChild(_prim_name(leaf, taken.setdefault(parent, set())))
+            if rel not in nodes:  # a grouping prim that isn't a node
+                _set_display_name(stage.DefinePrim(prim_paths[rel]), leaf)
+        return prim_paths[rel]
+
+    apis: dict[str, UsdShade.ConnectableAPI] = {"": UsdShade.ConnectableAPI(usd_material)}
+    for rel in sorted(nodes, key=lambda p: p.count("/")):
+        node, usd_path = nodes[rel], prim_path(rel)
+        schema = UsdShade.Shader if isinstance(node, ShaderNode) else UsdShade.NodeGraph
+        prim = schema.Define(stage, usd_path).GetPrim()
+        _set_display_name(prim, rel.rpartition("/")[2])
+        apis[rel] = UsdShade.ConnectableAPI(prim)
+        if isinstance(node, ShaderNode):
+            _write_shader_info(UsdShade.Shader(prim), node)
+
+    port_names: dict[tuple[str, str, str], str] = {}  # (node, "inputs" | "outputs", name) -> USD port name
+    created: list[tuple[Usd.Attribute, Port]] = []
+    owners = [("", material.inputs, outputs, None)] + [(rel, n.inputs, n.outputs, n) for rel, n in nodes.items()]
+    for rel, inputs, node_outputs, node in owners:
+        types = node.extras.get("fbx", {}).get("types", {}) if node is not None else {}
+        for kind, ports in (("inputs", inputs), ("outputs", node_outputs)):
+            used: set[str] = set()
+            for name, port in ports.items():
+                usd_name = ":".join(Tf.MakeValidIdentifier(part) for part in name.split(":"))
+                while usd_name in used:
+                    usd_name += "_"
+                used.add(usd_name)
+                port_names[(rel, kind, name)] = usd_name
+                type_name = _port_type(port)
+                api = apis[rel]
+                attr = (api.CreateInput if kind == "inputs" else api.CreateOutput)(usd_name, type_name).GetAttr()
+                if usd_name != name:
+                    attr.SetCustomDataByKey(NAME_KEY, name)
+                if kind == "inputs" and name in types and tuple(types[name]) != inferred_fbx_type(port):
+                    attr.SetCustomDataByKey(FBX_TYPE_KEY, Vt.StringArray([str(t) for t in types[name]]))
+                if port.color_space:
+                    attr.SetColorSpace(port.color_space)
+                if port.value is not None:
+                    try:
+                        value = _usd_value(port.value, type_name, node if isinstance(node, ShaderNode) else None, directory,
+                                           drop_missing)  # fmt: skip
+                        ok = value is not None and attr.Set(value)
+                    except (Tf.ErrorException, TypeError, ValueError):
+                        ok = False
+                    if not ok and isinstance(port.value, AssetPath):
+                        warnings.warn(f"material {material.name!r}: texture {port.value.path!r} not found; left out of the package")
+                    elif not ok:
+                        warnings.warn(f"material {material.name!r}: value of {rel or '<material>'}.{name} ({type_name}) not written")
+                created.append((attr, port))
+
+    for attr, port in created:
+        targets = []
+        for connection in port.connections:
+            owner = Sdf.Path(connection.node) if connection.node.startswith("/") else prim_paths.get(connection.node)
+            if owner is None:
+                warnings.warn(f"material {material.name!r}: connection to missing node {connection.node!r} dropped")
+                continue
+            kind, _, name = connection.port.partition(":")
+            usd_name = port_names.get((connection.node, kind, name))
+            usd_name = usd_name or ":".join(Tf.MakeValidIdentifier(part) for part in name.split(":"))
+            targets.append(owner.AppendProperty(f"{kind}:{usd_name}"))
+        if targets:
+            attr.SetConnections(targets)
+    return usd_material
+
+
+def _write_shader_info(shader: UsdShade.Shader, node: ShaderNode) -> None:
+    for source_type, asset in node.source_assets.items():
+        shader.SetSourceAsset(Sdf.AssetPath(asset.path), source_type)
+    for source_type, code in node.source_code.items():
+        shader.SetSourceCode(code, source_type)
+    if node.shader_id:
+        shader.SetShaderId(node.shader_id)
+    source = node.extras.get("usd", {}).get("implementationSource")
+    if source:
+        shader.GetImplementationSourceAttr().Set(source)
+
+
+def _port_type(port: Port) -> Sdf.ValueTypeName:
+    """The port's USD type, or one guessed from its value when the type name isn't a USD one."""
+    found = Sdf.ValueTypeNames.Find(port.type_name) if port.type_name else None
+    if found:
+        return found
+    value = port.value
+    if isinstance(value, AssetPath):
+        return Sdf.ValueTypeNames.Asset
+    if isinstance(value, bool):
+        return Sdf.ValueTypeNames.Bool
+    if isinstance(value, int):
+        return Sdf.ValueTypeNames.Int
+    if isinstance(value, float):
+        return Sdf.ValueTypeNames.Double
+    if isinstance(value, str):
+        return Sdf.ValueTypeNames.String
+    if isinstance(value, np.ndarray) and value.ndim == 1 and 2 <= len(value) <= 4:
+        return getattr(Sdf.ValueTypeNames, f"Double{len(value)}")
+    return Sdf.ValueTypeNames.Token
+
+
+def _usd_value(value, type_name: Sdf.ValueTypeName, node: ShaderNode | None, directory: Path | None, drop_missing: bool):
+    if isinstance(value, AssetPath):
+        path = _asset_path(value, node, directory, drop_missing)
+        return None if path is None else Sdf.AssetPath(path)
+    if isinstance(value, list) and value and isinstance(value[0], AssetPath):
+        paths = [_asset_path(v, node, directory, drop_missing) for v in value]
+        return Sdf.AssetPathArray([p for p in paths if p is not None])
+    if isinstance(value, np.ndarray):
+        cls = type_name.type.pythonClass  # e.g. Gf.Vec3d, Gf.Matrix4d, Vt.FloatArray
+        return cls(value.tolist()) if cls is not None else None
+    if isinstance(value, np.generic):
+        return value.item()
+    return value
+
+
+def _asset_path(asset: AssetPath, node: ShaderNode | None, directory: Path | None, drop_missing: bool = False) -> str | None:
+    """Where the written file should look for `asset`: relative to `directory` when it's on disk,
+    in `directory`/textures when it's only embedded (FBX), else as authored (None with `drop_missing`)."""
+    authored = asset.path.replace("\\", "/")
+    if directory is None:
+        return authored
+    if asset.resolved and os.path.isfile(asset.resolved):
+        try:
+            return os.path.relpath(asset.resolved, directory).replace(os.sep, "/")
+        except ValueError:  # another drive
+            return asset.resolved
+    content = node.extras.get("fbx", {}).get("content") if node is not None else None
+    if content:
+        name = os.path.basename(authored) or f"{Tf.MakeValidIdentifier(node.path)}.png"
+        target = Path(directory) / "textures" / name
+        if not target.exists():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(content)
+        return f"textures/{name}"
+    if drop_missing:
+        return None
+    return authored
 
 
 def _time_code(seconds: float, fps: float) -> float:
@@ -736,6 +986,8 @@ class _Reader:
         if (indices < 0).any():  # faces in no subset use the mesh's own binding
             indices[indices < 0] = len(slots)
             slots.append(whole)
+        if all(slot is None for slot in slots):  # e.g. a mesh reference's subsets, with bindings blocked
+            return []
         if mesh.material_indices is None:
             mesh.material_indices = indices
         return slots
@@ -857,23 +1109,48 @@ class _Reader:
 
 
 def _read_material(prim: Usd.Prim) -> Material:
-    """A Material prim as a generic graph: every Shader and NodeGraph below it, with ports and connections."""
+    """A Material prim as a generic graph: every Shader and NodeGraph below it, with ports and connections.
+
+    Node paths are made of the prims' display names (the original names when written by sceneport).
+    """
     root = prim.GetPath()
-    inputs, outputs = _read_ports(UsdShade.ConnectableAPI(prim), root)
-    material = Material(_display_name(prim), inputs=inputs, outputs=outputs)
+    paths = {root: ""}  # prim path -> node path relative to the material
+    prims = []
     for child in Usd.PrimRange(prim, _PREDICATE):
-        if child == prim:
-            continue
-        path = str(child.GetPath().MakeRelativePath(root))
+        if child != prim:
+            parent = paths.get(child.GetPath().GetParentPath(), str(child.GetPath().GetParentPath().MakeRelativePath(root)))
+            paths[child.GetPath()] = f"{parent}/{_display_name(child)}" if parent else _display_name(child)
+            prims.append(child)
+    inputs, outputs = _read_ports(UsdShade.ConnectableAPI(prim), root, paths)
+    material = Material(_display_name(prim), inputs=inputs, outputs=outputs)
+    for child in prims:
+        path = paths[child.GetPath()]
         if child.IsA(UsdShade.Shader):
-            inputs, outputs = _read_ports(UsdShade.ConnectableAPI(child), root)
+            inputs, outputs = _read_ports(UsdShade.ConnectableAPI(child), root, paths)
             node = ShaderNode(path, inputs=inputs, outputs=outputs)
             _read_shader_info(UsdShade.Shader(child), node)
+            types = {name: list(t) for name, t in _fbx_types(UsdShade.ConnectableAPI(child)).items()}
+            if types:
+                node.extras.setdefault("fbx", {})["types"] = types
             material.nodes[path] = node
         elif child.IsA(UsdShade.NodeGraph):  # also a Material nested in a Material
-            inputs, outputs = _read_ports(UsdShade.ConnectableAPI(child), root)
+            inputs, outputs = _read_ports(UsdShade.ConnectableAPI(child), root, paths)
             material.nodes[path] = NodeGraph(path, inputs=inputs, outputs=outputs)
     return material
+
+
+def _port_name(attr: Usd.Attribute) -> str:
+    """A port's name without its inputs:/outputs: prefix: the original name if sceneport sanitized it."""
+    return attr.GetCustomDataByKey(NAME_KEY) or attr.GetName().split(":", 1)[1]
+
+
+def _fbx_types(api: UsdShade.ConnectableAPI) -> dict[str, list[str]]:
+    out = {}
+    for port in api.GetInputs():
+        value = port.GetAttr().GetCustomDataByKey(FBX_TYPE_KEY)
+        if value is not None and len(value) == 3:
+            out[_port_name(port.GetAttr())] = [str(v) for v in value]
+    return out
 
 
 def _read_shader_info(shader: UsdShade.Shader, node: ShaderNode) -> None:
@@ -892,8 +1169,11 @@ def _read_shader_info(shader: UsdShade.Shader, node: ShaderNode) -> None:
         node.extras["usd"] = {"implementationSource": str(source.Get())}
 
 
-def _read_ports(api: UsdShade.ConnectableAPI, root: Sdf.Path) -> tuple[dict[str, Port], dict[str, Port]]:
-    """(inputs, outputs) of a shader, node graph or material; connections relative to the material at `root`."""
+def _read_ports(
+    api: UsdShade.ConnectableAPI, root: Sdf.Path, paths: dict[Sdf.Path, str]
+) -> tuple[dict[str, Port], dict[str, Port]]:
+    """(inputs, outputs) of a shader, node graph or material; connections name nodes by `paths` (see _read_material)."""
+    stage = api.GetPrim().GetStage()
     ports = []
     for group in (api.GetInputs(), api.GetOutputs()):
         out = {}
@@ -902,9 +1182,13 @@ def _read_ports(api: UsdShade.ConnectableAPI, root: Sdf.Path) -> tuple[dict[str,
             connections = []
             for source in attr.GetConnections():
                 owner = source.GetPrimPath()
-                node = str(owner.MakeRelativePath(root)) if owner.HasPrefix(root) else str(owner)
-                connections.append(Connection("" if node == "." else node, source.name))
-            out[str(port.GetBaseName())] = Port(
+                node = paths.get(owner, str(owner))  # outside the material: absolute path
+                target = stage.GetAttributeAtPath(source)
+                name = source.name
+                if target and target.GetCustomDataByKey(NAME_KEY):
+                    name = f"{name.split(':', 1)[0]}:{target.GetCustomDataByKey(NAME_KEY)}"
+                connections.append(Connection(node, name))
+            out[_port_name(attr)] = Port(
                 str(port.GetTypeName()),
                 _shade_value(_static_value(attr)) if attr.HasAuthoredValue() else None,
                 connections,

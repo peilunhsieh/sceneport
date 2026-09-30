@@ -25,7 +25,7 @@ from math import sqrt
 import numpy as np
 from numpy.typing import NDArray
 
-from .material import AssetPath, Material, Port, ShaderNode
+from .material import AssetPath, Connection, Material, Port, ShaderNode
 
 PREVIEW_SURFACE = "UsdPreviewSurface"
 STANDARD_SURFACE = "ND_standard_surface_surfaceshader"
@@ -340,3 +340,98 @@ def _vec(value, default: NDArray) -> NDArray[np.float64]:
     if value is None:
         return default
     return np.asarray(value, dtype=np.float64).ravel()
+
+
+# -- PBR -> UsdPreviewSurface graph -------------------------------------------------
+
+# PBRMaterial texture field -> (UsdPreviewSurface input, its type, "color" | "float" | "normal").
+_PREVIEW_TEXTURES = (
+    ("base_color_texture", "diffuseColor", "color3f", "color"),
+    ("emissive_texture", "emissiveColor", "color3f", "color"),
+    ("specular_texture", "specularColor", "color3f", "color"),
+    ("metallic_texture", "metallic", "float", "float"),
+    ("roughness_texture", "roughness", "float", "float"),
+    ("opacity_texture", "opacity", "float", "float"),
+    ("occlusion_texture", "occlusion", "float", "float"),
+    ("displacement_texture", "displacement", "float", "float"),
+    ("normal_texture", "normal", "normal3f", "normal"),
+)
+
+
+def preview_surface_nodes(pbr: PBRMaterial, prefix: str = "Preview") -> tuple[dict[str, ShaderNode], Port]:
+    """A UsdPreviewSurface network for `pbr`: (nodes keyed by path, the material's "surface" output).
+
+    Textures become UsdUVTexture nodes reading UVs through UsdPrimvarReader_float2
+    (varname = the texture's uv_set, or "st"), with a UsdTransform2d when the
+    texture has a UV transform. Normal textures without their own scale/bias get
+    the usual 2x - 1 decoding, with `normal_scale` applied to x and y.
+    """
+    nodes: dict[str, ShaderNode] = {}
+    surface = ShaderNode(f"{prefix}Surface", PREVIEW_SURFACE, outputs={"surface": Port("token")})
+    nodes[surface.path] = surface
+    values = {
+        "diffuseColor": ("color3f", pbr.base_color), "emissiveColor": ("color3f", pbr.emissive),
+        "metallic": ("float", pbr.metallic), "roughness": ("float", pbr.roughness), "opacity": ("float", pbr.opacity),
+        "opacityThreshold": ("float", pbr.opacity_threshold), "ior": ("float", pbr.ior),
+        "clearcoat": ("float", pbr.clearcoat), "clearcoatRoughness": ("float", pbr.clearcoat_roughness),
+    }  # fmt: skip
+    if pbr.specular_color is not None:
+        values["useSpecularWorkflow"] = ("int", 1)
+        values["specularColor"] = ("color3f", pbr.specular_color)
+    for name, (type_name, value) in values.items():
+        value = np.asarray(value, dtype=np.float64).copy() if type_name == "color3f" else value
+        surface.inputs[name] = Port(type_name, float(value) if type_name == "float" else value)
+
+    textures: dict[int, str] = {}  # id(TextureRef) -> node path
+    for field_name, input_name, type_name, kind in _PREVIEW_TEXTURES:
+        texture = getattr(pbr, field_name)
+        if texture is None:
+            continue
+        if id(texture) not in textures:
+            textures[id(texture)] = _preview_texture(nodes, texture, f"{prefix}Texture_{input_name}", prefix, kind, pbr.normal_scale)
+        output = "rgb" if kind != "float" else (texture.channels if texture.channels in "rgba" and len(texture.channels) == 1 else "r")
+        port = surface.inputs.setdefault(input_name, Port(type_name))
+        port.connections = [Connection(textures[id(texture)], f"outputs:{output}")]
+    return nodes, Port("token", connections=[Connection(surface.path, "outputs:surface")])
+
+
+def _preview_texture(nodes: dict, texture: TextureRef, path: str, prefix: str, kind: str, normal_scale: float) -> str:
+    node = ShaderNode(path, "UsdUVTexture", outputs={
+        "rgb": Port("float3"), "r": Port("float"), "g": Port("float"), "b": Port("float"), "a": Port("float"),
+    })  # fmt: skip
+    nodes[path] = node
+    if texture.file is not None:
+        node.inputs["file"] = Port("asset", texture.file)
+    if texture.content:  # embedded image (FBX): writers can save it next to the file
+        node.extras["fbx"] = {"content": texture.content}
+    space = texture.color_space if texture.color_space in ("raw", "sRGB") else ("sRGB" if kind == "color" else "raw")
+    node.inputs["sourceColorSpace"] = Port("token", space)
+    for axis, mode in zip("ST", texture.wrap):
+        if mode is not None:
+            node.inputs[f"wrap{axis}"] = Port("token", mode)
+    scale, bias = np.asarray(texture.scale, dtype=np.float64), np.asarray(texture.bias, dtype=np.float64)
+    if kind == "normal" and np.array_equal(scale, np.ones(4)) and np.array_equal(bias, np.zeros(4)):
+        scale = np.array([2.0 * normal_scale, 2.0 * normal_scale, 2.0, 1.0])
+        bias = np.array([-normal_scale, -normal_scale, -1.0, 0.0])
+    if not np.array_equal(scale, np.ones(4)):
+        node.inputs["scale"] = Port("float4", scale)
+    if not np.array_equal(bias, np.zeros(4)):
+        node.inputs["bias"] = Port("float4", bias)
+
+    uv_set = texture.uv_set or "st"
+    reader_path = f"{prefix}UV_{uv_set}"
+    if reader_path not in nodes:
+        nodes[reader_path] = ShaderNode(reader_path, "UsdPrimvarReader_float2", inputs={"varname": Port("string", uv_set)},
+                                        outputs={"result": Port("float2")})  # fmt: skip
+    source = Connection(reader_path, "outputs:result")
+    if (np.any(texture.uv_translation) or texture.uv_rotation or np.any(np.asarray(texture.uv_scale) != 1)):
+        transform = ShaderNode(f"{path}_UVTransform", "UsdTransform2d", inputs={
+            "in": Port("float2", connections=[source]),
+            "translation": Port("float2", np.asarray(texture.uv_translation, dtype=np.float64)[:2].copy()),
+            "rotation": Port("float", float(texture.uv_rotation)),
+            "scale": Port("float2", np.asarray(texture.uv_scale, dtype=np.float64)[:2].copy()),
+        }, outputs={"result": Port("float2")})  # fmt: skip
+        nodes[transform.path] = transform
+        source = Connection(transform.path, "outputs:result")
+    node.inputs["st"] = Port("float2", connections=[source])
+    return path

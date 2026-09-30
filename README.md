@@ -10,7 +10,7 @@ a converter around it:
 | Package | Responsibility |
 |---|---|
 | `sceneport.scene` | Plain numpy data classes: Scene, Node, Mesh, Primvar, Transform, Material |
-| `sceneport.interop.fbx` | Native FBX read/write (materials: read only) |
+| `sceneport.interop.fbx` | Native FBX read/write |
 | `sceneport.interop.usd` | USD read/write (`.usd`, `.usda`, `.usdc`, `.usdz`) via usd-core |
 | `sceneport.interop.obj`, `sceneport.interop.ply` | OBJ and PLY read/write (geometry only) |
 | `sceneport.interop.trimesh` | Conversion to and from trimesh |
@@ -60,7 +60,7 @@ times = clip.frame_times()               # one per frame at clip.fps
 clip.skinned_vertices(scene, mesh, times)  # (F, N, 3)
 clip.world_matrices(scene, times)        # {node: (F, 4, 4)}
 
-# Materials (read from USD and FBX): generic shading node graphs
+# Materials (USD and FBX): generic shading node graphs
 node.materials                           # the node's material slots
 mesh.material_indices                    # (F,) slot of each face, or None = slot 0
 material = node.materials[0]
@@ -114,9 +114,11 @@ scene = sceneport.load("model.usd")  # composed stage: references, payloads, ins
   joints are written under the Skeleton, placed at their joint's rest pose, and
   re-attached on load. When a skinned mesh and its skeleton share no ancestor,
   a SkelRoot is generated around them and dropped again on load.
-- Materials are read (not yet written) as generic UsdShade graphs, whatever
-  the node library (UsdPreviewSurface, MaterialX, renderer-specific).
-  `materialBind` GeomSubsets become per-face material slots.
+- Materials are read and written as generic UsdShade graphs, whatever the
+  node library (UsdPreviewSurface, MaterialX, renderer-specific).
+  `materialBind` GeomSubsets are per-face material slots. Materials from FBX
+  also get a UsdPreviewSurface network; embedded FBX textures are written to
+  a `textures` folder (packaged in `.usdz`).
 
 ## Converting files
 
@@ -126,7 +128,8 @@ sceneport convert model.usdz model.fbx  # .fbx, .usd, .usda, .usdc, .usdz, .obj,
 sceneport convert scan.ply scan.usd
 ```
 
-Meshes, blend shapes, skins and animation carry over between FBX and USD.
+Meshes, blend shapes, skins, animation and materials carry over between FBX
+and USD (materials as Phong in FBX; see the conventions below).
 For PLY, `sceneport.save(scene, "x.ply", uvs="vertex")` writes per-vertex UVs
 that Blender reads (splitting vertices at UV seams); the default per-corner UVs
 are lossless but only MeshLab-style readers see them; `uvs=None` leaves UVs out.
@@ -180,7 +183,7 @@ must round-trip byte-exactly.
 - [x] Phase 1 — static mesh (vertices, polygons, normals, UVs), trimesh conversion
 - [x] Phase 1b — USD read/write for everything in Phase 1
 - [x] Phase 2 — blend shapes (with in-betweens), FBX and USD
-- [ ] Phase 3 — materials / textures (reading USD and FBX, PBR interpretation done)
+- [x] Phase 3 — materials / textures (USD graphs, FBX Phong, PBR interpretation)
 - [x] Phase 4 — skeleton / skinning (linear blend skinning), FBX and USD
 - [x] Phase 5 — animation (keyframes, joints/nodes/blend shape weights), FBX and USD
 

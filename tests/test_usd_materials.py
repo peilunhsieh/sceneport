@@ -156,8 +156,8 @@ def test_trace_missing_source_and_cycle():
         material.trace(graph.inputs["a"])
 
 
-def test_saving_warns_that_materials_are_dropped(scene, tmp_path):
-    for suffix in (".usda", ".fbx", ".obj"):
+def test_geometry_formats_warn_that_materials_are_dropped(scene, tmp_path):
+    for suffix in (".obj", ".ply"):
         with pytest.warns(UserWarning, match="materials"):
             sceneport.save(scene, tmp_path / f"out{suffix}")
 

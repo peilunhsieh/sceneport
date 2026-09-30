@@ -191,7 +191,25 @@ future changes can keep them consistent (or revisit them deliberately).
   ReflectionFactor, its opacity rules). Anything else (math nodes, unknown
   libraries) is skipped and listed in `notes`, so the graph stays the source of
   truth and the PBR view is a convenience.
-- Only reading is implemented; writers warn that materials are dropped.
+- **Writing keeps graphs, converts only when a format needs it.** USD writes
+  any graph as UsdShade prims (invalid names made valid, originals in
+  displayName / customData). FBX can only hold Phong: graphs that came from FBX
+  are written back unchanged (property types kept in the node's
+  `extras["fbx"]["types"]`, and in USD customData when not the inferred type);
+  others go through `pbr()` and Blender's exporter formulas (shininess =
+  ((1 - roughness) * 10)^2, ReflectionFactor = metallic, its opacity and
+  texture-slot rules). An FBX graph written to USD keeps its surface on
+  `outputs:fbx:surface` and gets a generated UsdPreviewSurface network on
+  `outputs:surface`, so USD renderers see it and FBX -> USD -> FBX is lossless.
+- **Slots on write:** FBX connects the node's materials to its Model in slot
+  order and writes a `LayerElementMaterial` (empty slots get a "default"
+  material). USD binds slot 0 to the mesh, or writes one `materialBind`
+  GeomSubset per slot; a shared mesh's later prims block the bindings they
+  bring along from the first one, so each node gets exactly its own slots.
+- **Texture files:** USD paths are made relative to the written file when the
+  texture exists on disk; FBX-embedded images are written to a `textures`
+  folder next to the USD file (inside the package for `.usdz`, which leaves out
+  textures it can't find, with a warning). OBJ and PLY still drop materials.
 
 ## Animation
 

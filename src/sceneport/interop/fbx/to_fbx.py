@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import warnings
 
 import numpy as np
 
@@ -14,13 +13,12 @@ from .blendshapes import write_blend_shapes
 from .binary import write
 from .binary.node import FBXNode, Prop
 from .document import ROOT_ID, FBXDocument, FBXObject, Properties70
+from .materials import MaterialWriter, material_layer
 from .settings import write_global_settings
 from .skin import write_bind_pose, write_skin
 
 
 def save(scene: Scene, path: str | os.PathLike, *, version: int = 7400) -> None:
-    if scene.materials or any(node.materials for node, _ in scene.walk()):
-        warnings.warn("materials are not written to FBX yet")
     write(document_from_scene(scene, version=version).to_file(), path)
 
 
@@ -30,6 +28,11 @@ def document_from_scene(scene: Scene, *, version: int = 7400) -> FBXDocument:
     first_users: dict[int, tuple[Mesh, FBXObject]] = {}  # id(Mesh) -> (mesh, first Model using it)
     models: dict[Node, FBXObject] = {}
     shape_channels: dict[tuple[int, str], FBXObject] = {}  # (id(Mesh), shape name) -> BlendShapeChannel
+    materials = MaterialWriter(doc)
+    for material in scene.materials:  # unbound ones too, in scene order
+        materials.material(material)
+    # Meshes with material slots on any of their nodes get a LayerElementMaterial.
+    slotted = {id(node.mesh) for node, _ in scene.walk() if node.mesh is not None and node.materials}
 
     def add(node: Node, parent_id: int) -> None:
         model = doc.add_object("Model", node.name, _model_subtype(node))
@@ -57,10 +60,11 @@ def document_from_scene(scene: Scene, *, version: int = 7400) -> FBXDocument:
         if node.mesh is not None:
             key = id(node.mesh)
             if key not in geometries:
-                geometries[key], channels = _add_geometry(doc, node.mesh)
+                geometries[key], channels = _add_geometry(doc, node.mesh, key in slotted)
                 shape_channels.update(((key, name), channel) for name, channel in channels.items())
                 first_users[key] = (node.mesh, model)
             doc.connect(geometries[key], model)
+            materials.connect_slots(node, model)
         for child in node.children:
             add(child, model.id)
 
@@ -104,7 +108,7 @@ def _transform_props(t: Transform) -> Properties70:
     return props
 
 
-def _add_geometry(doc: FBXDocument, mesh: Mesh) -> tuple[FBXObject, dict[str, FBXObject]]:
+def _add_geometry(doc: FBXDocument, mesh: Mesh, with_materials: bool) -> tuple[FBXObject, dict[str, FBXObject]]:
     mesh.validate()
     pvi = mesh.face_vertex_indices.copy()
     ends = np.cumsum(mesh.face_vertex_counts) - 1
@@ -123,6 +127,9 @@ def _add_geometry(doc: FBXDocument, mesh: Mesh) -> tuple[FBXObject, dict[str, FB
     for i, (name, primvar) in enumerate(mesh.uvs.items()):
         children.append(layers.write_layer(layers.UV, i, name, primvar))
         table[i].append((layers.UV.element, i))
+    if with_materials:
+        children.append(material_layer(mesh.material_indices))
+        table[0].append(("LayerElementMaterial", 0))
     if any(table):
         children += layers.write_layer_table(table)
 
