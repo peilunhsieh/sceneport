@@ -58,8 +58,10 @@ def test_obj_parsing_variants(tmp_path):
         "usemtl m\ns off\nf -4//1 -3//1 -2//1 -1//1  # relative indices\n"
         "g second\nv 5 5 5\nv 6 5 5\nv 6 6 5\nf 5 6 7\n"
     )
-    back = sceneport.load(tmp_path / "v.obj")
+    with pytest.warns(UserWarning, match="not found|not in any material library"):  # x.mtl doesn't exist
+        back = sceneport.load(tmp_path / "v.obj")
     assert [n.name for n in back.nodes] == ["first", "second"]  # g groups when there is no o
+    assert [m.name for m in back.nodes[1].materials] == ["m"]  # usemtl carries over to the next group
     quad, tri = back.nodes[0].mesh, back.nodes[1].mesh
     np.testing.assert_array_equal(quad.face_vertex_indices, [0, 1, 2, 3])
     assert quad.normals.interpolation == "vertex"  # each vertex has a single normal, so per vertex is lossless

@@ -12,6 +12,8 @@ It understands these surface nodes:
   ND_separate*_* and ND_convert_* nodes)
 - FBX FbxSurfacePhong / FbxSurfaceLambert (textures: FbxFileTexture), converted
   like Blender's FBX importer does (approximate; Phong isn't physically based)
+- Wavefront MTL MtlSurface (textures: MtlTexture), converted like Blender's OBJ
+  importer does (illum flags, roughness from Ns, metallic from Ka, Pr/Pm override)
 
 A texture replaces its parameter's value (as in UsdPreviewSurface and Blender).
 Anything that can't be expressed is skipped and described in `notes`.
@@ -31,7 +33,10 @@ PREVIEW_SURFACE = "UsdPreviewSurface"
 STANDARD_SURFACE = "ND_standard_surface_surfaceshader"
 OPEN_PBR = "ND_open_pbr_surface_surfaceshader"
 FBX_SURFACES = ("FbxSurfacePhong", "FbxSurfaceLambert", "FbxSurfaceMaterial")
-SUPPORTED_SURFACES = (PREVIEW_SURFACE, STANDARD_SURFACE, OPEN_PBR, *FBX_SURFACES)
+MTL_SURFACE = "MtlSurface"
+SUPPORTED_SURFACES = (PREVIEW_SURFACE, STANDARD_SURFACE, OPEN_PBR, *FBX_SURFACES, MTL_SURFACE)
+# Surfaces of formats with a fixed material model, and the render context they are kept under in USD.
+NATIVE_SURFACES = {**dict.fromkeys(FBX_SURFACES, "fbx"), MTL_SURFACE: "mtl"}
 
 _WRAP = {  # UsdUVTexture / MaterialX address modes -> common names
     "repeat": "repeat", "periodic": "repeat", "clamp": "clamp", "mirror": "mirror",
@@ -108,9 +113,25 @@ def pbr_material(material: Material, context: str | None = None) -> PBRMaterial 
                 reader.preview_surface()
             elif surface.shader_id in (STANDARD_SURFACE, OPEN_PBR):
                 reader.materialx(surface.shader_id == OPEN_PBR)
+            elif surface.shader_id == MTL_SURFACE:
+                reader.mtl()
             else:
                 reader.fbx()
             return out
+    return None
+
+
+def native_surface(material: Material, shader_ids) -> ShaderNode | None:
+    """The material's surface node with one of `shader_ids` (e.g. FBX_SURFACES), under any surface output.
+
+    "<context>:surface" of the format (NATIVE_SURFACES) is tried first, where USD files written by sceneport keep it.
+    """
+    contexts = {NATIVE_SURFACES.get(i) for i in shader_ids} - {None}
+    keys = sorted((k for k in material.outputs if k.endswith("surface")), key=lambda k: k.rpartition(":")[0] not in contexts)
+    for key in keys:
+        node, _, _ = material.trace(material.outputs[key])
+        if isinstance(node, ShaderNode) and node.shader_id in shader_ids:
+            return node
     return None
 
 
@@ -168,6 +189,63 @@ class _Reader:
         if emission > 0:
             color, o.emissive_texture = self.color("emission_color", (1, 1, 1))
             o.emissive = color if open_pbr else color * emission
+
+    def mtl(self) -> None:
+        """Blender's OBJ importer conversion (io/wavefront_obj/importer/obj_import_mtl.cc)."""
+        o = self.out
+        illum = int(self.first("illum", -1))
+        highlight = illum == 2
+        reflection = illum in (3, 4, 5, 6, 7, 8)
+        transparency = illum in (4, 6, 7, 9)
+        glass = illum in (4, 9)
+        if illum not in (-1, 1, 2, 3, 4, 5, 6, 7, 8, 9):
+            o.notes.append(f"illum {illum} not supported; read as illum 1")
+        o.base_color, o.base_color_texture = self.color("Kd", (0.8, 0.8, 0.8))
+        ns = self.surface.inputs.get("Ns")
+        if ns is not None and ns.value is not None:
+            o.roughness = 1.0 - sqrt(min(max(self.first("Ns", 0.0), 0.0), 1000.0) / 1000.0)
+        else:
+            o.roughness = 0.0 if highlight else 1.0
+        if reflection:
+            ka = self.surface.inputs.get("Ka")
+            o.metallic = float(np.mean(ka.value)) if ka is not None and ka.value is not None else 1.0
+        else:
+            o.metallic = 0.0
+        ior = self.surface.inputs.get("Ni")
+        if ior is not None and ior.value is not None:
+            o.ior = self.first("Ni", 1.5)
+        elif glass:
+            o.ior = 1.5
+        elif transparency:
+            o.ior = 1.0
+        if self.surface.inputs.get("d") is not None and self.surface.inputs["d"].value is not None:
+            o.opacity = self.first("d", 1.0)
+        elif self.surface.inputs.get("Tr") is not None:
+            o.opacity = 1.0 - self.first("Tr", 0.0)
+        for name in ("Pr", "Pm"):
+            port = self.surface.inputs.get(name)
+            if port is not None and port.value is not None:
+                setattr(o, "roughness" if name == "Pr" else "metallic", self.first(name, 0.0))
+        o.emissive, o.emissive_texture = self.color("Ke", (0, 0, 0))
+        if "Pc" in self.surface.inputs:
+            o.clearcoat = 0.25 * self.first("Pc", 0.0)  # Blender keeps an old 4x factor in MTL files
+        if "Pcr" in self.surface.inputs:
+            o.clearcoat_roughness = self.first("Pcr", 0.0)
+        o.roughness_texture = self.texture("Pr") or self.texture("Ns")
+        o.metallic_texture = self.texture("Pm") or self.texture("refl")
+        o.specular_texture = self.texture("Ks")
+        o.opacity_texture = self.texture("d")
+        if o.opacity_texture is not None:
+            o.opacity_texture.channels = "a"  # Blender links the image's alpha
+        o.normal_texture = self.texture("bump")
+        if o.normal_texture is not None and o.normal_texture.node is not None:
+            strength = o.normal_texture.node.inputs.get("bm")
+            if strength is not None and strength.value is not None:
+                o.normal_scale = max(float(np.ravel(strength.value)[0]), 0.0)
+        for field_name in ("roughness_texture", "metallic_texture", "opacity_texture"):
+            texture = getattr(o, field_name)
+            if texture is not None and texture.channels in ("rgb", "rgba"):
+                texture.channels = "r"
 
     def fbx(self) -> None:
         """Blender's FBX importer conversion (io_scene_fbx: blen_read_material and texture links)."""
@@ -245,6 +323,8 @@ class _Reader:
                 return self.mtlx_texture(node, channels)
             if shader_id == "FbxFileTexture":
                 return self.fbx_texture(node)
+            if shader_id == "MtlTexture":
+                return self.mtl_texture(node)
             if shader_id == "FbxLayeredTexture":
                 self.out.notes.append(f"{param}: layered texture {node.path!r} read as its first layer")
                 name = "in" if "in" in node.inputs else min((k for k in node.inputs if k.startswith("layer")), default=None)
@@ -323,6 +403,15 @@ class _Reader:
             elif isinstance(source, ShaderNode) and (source.shader_id or "").startswith("ND_texcoord"):
                 index = int(self.value(source, "index", 0))
                 texture.uv_set = None if index == 0 else f"index {index}"
+        return texture
+
+    def mtl_texture(self, node: ShaderNode) -> TextureRef:
+        texture = TextureRef(self.value(node, "file"), "rgb", node=node)
+        texture.uv_translation = _vec(self.value(node, "o"), np.zeros(3))[:2]
+        texture.uv_scale = _vec(self.value(node, "s"), np.ones(3))[:2]
+        clamp = self.value(node, "clamp")
+        if clamp is not None:
+            texture.wrap = ("clamp", "clamp") if str(clamp) == "on" else ("repeat", "repeat")
         return texture
 
     def fbx_texture(self, node: ShaderNode) -> TextureRef:

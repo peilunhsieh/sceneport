@@ -1,4 +1,4 @@
-"""Read and write Wavefront OBJ (geometry; materials on write).
+"""Read and write Wavefront OBJ (geometry, with materials in MTL files).
 
 Writing: one `o` group per mesh node, with vertices in world space (like
 Blender's exporter). Skinned meshes are written as posed by the scene's current
@@ -15,6 +15,11 @@ Blender does.
 Reading: one Node + Mesh per `o` group (or per `g` group if the file has no
 `o`). Normals indexed like the vertices come back per vertex, others per corner.
 OBJ has no units or axes; the Scene defaults (meters, Y up) are used.
+Materials come from the `mtllib` files (plus an MTL file with the OBJ's name, as
+Blender does); `usemtl` sets the material of the faces that follow, carrying
+over into the next group. A group's materials, in order of first use, are its
+node's slots, with per-face material_indices when there are several. Names
+missing from the libraries get an empty Material (with a warning).
 """
 
 from __future__ import annotations
@@ -29,7 +34,7 @@ from numpy.typing import NDArray
 from ..scene.types import Mesh, Node, Primvar, Scene
 from ..scene.material import Material
 from .export import mesh_in_world, warn_dropped
-from .mtl import material_block
+from .mtl import load_library, material_block
 
 
 def save(
@@ -122,11 +127,14 @@ def _indexed_corners(mesh: Mesh, primvar: Primvar | None) -> tuple[NDArray, NDAr
 
 
 def load(path: str | os.PathLike) -> Scene:
+    path = Path(path)
     positions, uvs, normals = [], [], []
-    groups: list[tuple[str, list[list[tuple[int, int, int]]]]] = []  # (name, faces of (v, vt, vn))
+    # (name, faces of (v, vt, vn), material name of each face or None)
+    groups: list[tuple[str, list[list[tuple[int, int, int]]], list[str | None]]] = []
+    libraries: list[str] = []
     has_objects = False
-    faces = None
-    for raw in Path(path).read_text(errors="replace").splitlines():
+    faces, face_materials, material = None, None, None
+    for raw in path.read_text(errors="replace").splitlines():
         parts = raw.split("#", 1)[0].split()
         if not parts:
             continue
@@ -141,23 +149,61 @@ def load(path: str | os.PathLike) -> Scene:
             has_objects = has_objects or key == "o"
             name = " ".join(parts[1:]) or "mesh"
             if faces is not None and not faces:  # an empty group directly before this one: rename it
-                groups[-1] = (name, faces)
+                groups[-1] = (name, faces, face_materials)
             else:
-                faces = []
-                groups.append((name, faces))
+                faces, face_materials = [], []
+                groups.append((name, faces, face_materials))
         elif key == "f":
             if faces is None:
-                faces = []
-                groups.append((Path(path).stem, faces))
+                faces, face_materials = [], []
+                groups.append((path.stem, faces, face_materials))
             counts = (len(positions), len(uvs), len(normals))
             faces.append([_corner(token, counts) for token in parts[1:]])
+            face_materials.append(material)
+        elif key == "usemtl":
+            material = raw.strip()[len("usemtl") :].strip() or None  # a bare usemtl: no material
+        elif key == "mtllib":
+            library = raw.strip()[len("mtllib") :].strip().strip('"')
+            if library and library not in libraries:
+                libraries.append(library)
 
     positions, uvs, normals = (np.array(a, dtype=np.float64).reshape(-1, n) for a, n in ((positions, 3), (uvs, 2), (normals, 3)))
     scene = Scene()
-    for name, group_faces in groups:
+    materials = _load_libraries(path, libraries)
+    for name, group_faces, group_materials in groups:
         if group_faces:
-            scene.add(Node(name, mesh=_group_mesh(name, group_faces, positions, uvs, normals)))
+            node = scene.add(Node(name, mesh=_group_mesh(name, group_faces, positions, uvs, normals)))
+            _assign_slots(node, group_materials, materials)
+    scene.materials = list(materials.values())
     return scene
+
+
+def _load_libraries(path: Path, libraries: list[str]) -> dict[str, Material]:
+    """Materials of the mtllib files, then of an MTL file named like the OBJ (Blender reads that one too)."""
+    materials: dict[str, Material] = {}
+    default = path.with_suffix(".mtl").name
+    for library in libraries + ([default] if default not in libraries else []):
+        file = path.parent / library.replace("\\", "/")
+        if file.is_file():
+            load_library(file, materials)
+        elif library != default:
+            warnings.warn(f"OBJ {path.name}: material library {library!r} not found")
+    return materials
+
+
+def _assign_slots(node: Node, face_materials: list[str | None], materials: dict[str, Material]) -> None:
+    """The group's materials in order of first use become the node's slots."""
+    order = list(dict.fromkeys(face_materials))
+    if order == [None]:
+        return
+    for name in order:
+        if name is not None and name not in materials:
+            warnings.warn(f"OBJ: material {name!r} is not in any material library; using an empty one")
+            materials[name] = Material(name)
+    node.materials = [materials[name] if name is not None else None for name in order]
+    if len(order) > 1:
+        index = {name: i for i, name in enumerate(order)}
+        node.mesh.material_indices = np.array([index[name] for name in face_materials], dtype=np.int32)
 
 
 def _corner(token: str, counts: tuple[int, int, int]) -> tuple[int, int, int]:

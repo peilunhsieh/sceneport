@@ -34,7 +34,7 @@ written under a "_materials" Scope in the first root prim; names that aren't
 valid identifiers (prims and ports) are made valid, with the original in
 displayName / customData. A graph whose surface is an FBX surface keeps it
 under outputs:fbx:surface and gets a generated UsdPreviewSurface network as
-outputs:surface. Texture files resolved on disk are referenced relative to the
+outputs:surface (likewise an MTL surface, under outputs:mtl:surface). Texture files resolved on disk are referenced relative to the
 written file; textures embedded in an FBX are written to a "textures" folder.
 Reading resolves a mesh's bound material like USD does (inherited, collection
 and purpose-less bindings); "materialBind" GeomSubsets become the node's
@@ -67,9 +67,9 @@ from ..math import (
 )
 from ..scene.animation import Animation, Channel, rest_value
 from ..scene.material import AssetPath, Connection, Material, NodeGraph, Port, ShaderNode
-from ..scene.pbr import FBX_SURFACES, preview_surface_nodes
+from ..scene.pbr import NATIVE_SURFACES, native_surface, preview_surface_nodes
 from .export import texture_path
-from .fbx.materials import fbx_surface, inferred_fbx_type
+from .fbx.materials import inferred_fbx_type
 from ..scene.types import BlendShape, Inbetween, Mesh, Node, Primvar, Scene, Skin, Transform
 
 EXTENSIONS = (".usd", ".usda", ".usdc", ".usdz")
@@ -544,9 +544,11 @@ def _write_material(
     usd_material = UsdShade.Material.Define(stage, path)
     _set_display_name(usd_material.GetPrim(), material.name)
     nodes, outputs = dict(material.nodes), dict(material.outputs)
-    pbr = material.pbr() if fbx_surface(material) is not None else None
-    if pbr is not None and pbr.source in FBX_SURFACES:
-        outputs = {("fbx:surface" if key == "surface" else key): port for key, port in outputs.items()}
+    native = native_surface(material, tuple(NATIVE_SURFACES))
+    pbr = material.pbr() if native is not None else None
+    if pbr is not None and pbr.source in NATIVE_SURFACES:  # no USD-readable surface yet
+        context = NATIVE_SURFACES[pbr.source]
+        outputs = {(f"{context}:surface" if key == "surface" else key): port for key, port in outputs.items()}
         prefix = "Preview"
         while any(p == prefix or p.startswith(prefix) for p in nodes):
             prefix += "_"

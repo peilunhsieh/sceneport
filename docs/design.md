@@ -217,6 +217,15 @@ future changes can keep them consistent (or revisit them deliberately).
   -o / -s / -bm, `usemtl` wherever a face's slot changes, materials sorted by
   name. Texture paths follow the same rules as USD (relative, embedded images
   to `textures/`). UV rotation has no MTL option (warning).
+- **OBJ reads MTL back** the FBX way: a material keeps its raw MTL keys on an
+  `MtlSurface` node and each map line becomes an `MtlTexture` node (options as
+  inputs, path resolved next to the MTL), so OBJ -> OBJ writes the MTL back
+  unchanged. `pbr()` interprets it like Blender's OBJ importer (illum flags;
+  roughness = 1 - sqrt(Ns / 1000); metallic = mean(Ka) when illum reflects; Pr /
+  Pm override; Pc / 4). `usemtl` state carries over between groups as in
+  Blender; each group's materials in order of first use are its slots. In USD
+  the MTL surface is kept on `outputs:mtl:surface` next to a generated
+  UsdPreviewSurface, as for FBX.
 
 ## Animation
 

@@ -33,7 +33,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from ...scene.material import AssetPath, Connection, Material, Port, ShaderNode
-from ...scene.pbr import FBX_SURFACES, PBRMaterial, TextureRef
+from ...scene.pbr import FBX_SURFACES, PBRMaterial, TextureRef, native_surface
 from ...scene.types import Node
 from .binary.node import FBXNode, Prop
 from .document import NAME_SEP, FBXDocument, FBXObject, Properties70, Property
@@ -179,12 +179,7 @@ FILE_INPUTS = ("file", "FileName", "RelativeFilename")
 
 def fbx_surface(material: Material) -> ShaderNode | None:
     """The material's FBX surface node, if it has one (under "fbx:surface" or any other surface output)."""
-    keys = sorted((k for k in material.outputs if k.endswith("surface")), key=lambda k: k != "fbx:surface")
-    for key in keys:
-        node, name, _ = material.trace(material.outputs[key])
-        if isinstance(node, ShaderNode) and node.shader_id in FBX_SURFACES:
-            return node
-    return None
+    return native_surface(material, FBX_SURFACES)
 
 
 class MaterialWriter:
