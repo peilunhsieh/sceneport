@@ -68,6 +68,7 @@ from ..math import (
 from ..scene.animation import Animation, Channel, rest_value
 from ..scene.material import AssetPath, Connection, Material, NodeGraph, Port, ShaderNode
 from ..scene.pbr import FBX_SURFACES, preview_surface_nodes
+from .export import texture_path
 from .fbx.materials import fbx_surface, inferred_fbx_type
 from ..scene.types import BlendShape, Inbetween, Mesh, Node, Primvar, Scene, Skin, Transform
 
@@ -678,27 +679,9 @@ def _usd_value(value, type_name: Sdf.ValueTypeName, node: ShaderNode | None, dir
 
 
 def _asset_path(asset: AssetPath, node: ShaderNode | None, directory: Path | None, drop_missing: bool = False) -> str | None:
-    """Where the written file should look for `asset`: relative to `directory` when it's on disk,
-    in `directory`/textures when it's only embedded (FBX), else as authored (None with `drop_missing`)."""
-    authored = asset.path.replace("\\", "/")
-    if directory is None:
-        return authored
-    if asset.resolved and os.path.isfile(asset.resolved):
-        try:
-            return os.path.relpath(asset.resolved, directory).replace(os.sep, "/")
-        except ValueError:  # another drive
-            return asset.resolved
     content = node.extras.get("fbx", {}).get("content") if node is not None else None
-    if content:
-        name = os.path.basename(authored) or f"{Tf.MakeValidIdentifier(node.path)}.png"
-        target = Path(directory) / "textures" / name
-        if not target.exists():
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(content)
-        return f"textures/{name}"
-    if drop_missing:
-        return None
-    return authored
+    fallback = f"{Tf.MakeValidIdentifier(node.path)}.png" if node is not None else "texture.png"
+    return texture_path(asset, directory, content=content, fallback_name=fallback, drop_missing=drop_missing)
 
 
 def _time_code(seconds: float, fps: float) -> float:

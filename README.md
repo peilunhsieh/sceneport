@@ -12,7 +12,7 @@ a converter around it:
 | `sceneport.scene` | Plain numpy data classes: Scene, Node, Mesh, Primvar, Transform, Material |
 | `sceneport.interop.fbx` | Native FBX read/write |
 | `sceneport.interop.usd` | USD read/write (`.usd`, `.usda`, `.usdc`, `.usdz`) via usd-core |
-| `sceneport.interop.obj`, `sceneport.interop.ply` | OBJ and PLY read/write (geometry only) |
+| `sceneport.interop.obj`, `sceneport.interop.ply` | OBJ (+ MTL on write) and PLY read/write |
 | `sceneport.interop.trimesh` | Conversion to and from trimesh |
 
 The FBX support follows Blender's
@@ -133,9 +133,10 @@ and USD (materials as Phong in FBX; see the conventions below).
 For PLY, `sceneport.save(scene, "x.ply", uvs="vertex")` writes per-vertex UVs
 that Blender reads (splitting vertices at UV seams); the default per-corner UVs
 are lossless but only MeshLab-style readers see them; `uvs=None` leaves UVs out.
-OBJ and PLY hold geometry only: meshes are written in world space as currently
+OBJ and PLY hold geometry: meshes are written in world space as currently
 posed (blend shapes at their default weights), with a warning about what is
-dropped. See the conventions below for what each format can hold.
+dropped. OBJ also writes materials to an MTL file next to it, like Blender
+(`materials=False` to skip, `pbr_extensions=True` for the Pr/Pm keys). See the conventions below for what each format can hold.
 
 ## Inspecting files
 

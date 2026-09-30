@@ -73,7 +73,7 @@ future changes can keep them consistent (or revisit them deliberately).
   per-corner UVs: OBJ through `vt` plus `f v/vt/vn` indices (written in our
   indexed form directly), PLY through a per-face `texcoord` list (the MeshLab
   convention). PLY also reads per-vertex `s`/`t` UVs.
-- Geometry only. Writers bake each mesh into world space as currently posed
+- Geometry (plus MTL materials for OBJ, below). Writers bake each mesh into world space as currently posed
   (skinned by the scene's joints, blend shapes at default weights) — what
   Blender's exporters do — and warn about dropped skins, blend shapes and
   animation. No axis conversion: coordinates are written as they are.
@@ -209,7 +209,14 @@ future changes can keep them consistent (or revisit them deliberately).
 - **Texture files:** USD paths are made relative to the written file when the
   texture exists on disk; FBX-embedded images are written to a `textures`
   folder next to the USD file (inside the package for `.usdz`, which leaves out
-  textures it can't find, with a warning). OBJ and PLY still drop materials.
+  textures it can't find, with a warning). PLY drops materials.
+- **OBJ writes an MTL file** next to it (interop/mtl.py), following Blender's
+  OBJ exporter: values from `pbr()` (Ns = (1 - roughness)^2 * 1000, Ka =
+  metallic, Kd, Ks, Ke, Ni, d, Blender's illum choice), optional PBR keys
+  (`pbr_extensions=True`: Pr, Pm, Pc, Pcr, map_Pr, map_Pm), texture maps with
+  -o / -s / -bm, `usemtl` wherever a face's slot changes, materials sorted by
+  name. Texture paths follow the same rules as USD (relative, embedded images
+  to `textures/`). UV rotation has no MTL option (warning).
 
 ## Animation
 

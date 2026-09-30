@@ -1,4 +1,4 @@
-"""Read and write Wavefront OBJ (geometry only).
+"""Read and write Wavefront OBJ (geometry; materials on write).
 
 Writing: one `o` group per mesh node, with vertices in world space (like
 Blender's exporter). Skinned meshes are written as posed by the scene's current
@@ -6,6 +6,11 @@ joint transforms and blend shapes at their default weights; skins, blend shapes
 and animation themselves can't be stored (a warning says so). Polygons keep
 their size; normals (`vn`) and the first UV set (`vt`) keep their indexed,
 per-corner form (`f v/vt/vn`), so UV seams and vertex order survive.
+
+Materials: the node's material slots are written to an MTL file next to the OBJ
+(same name, see mtl.py), referenced with `mtllib`; faces switch material with
+`usemtl` where their slot changes (a bare `usemtl` for an empty slot), as
+Blender does.
 
 Reading: one Node + Mesh per `o` group (or per `g` group if the file has no
 `o`). Normals indexed like the vertices come back per vertex, others per corner.
@@ -22,14 +27,26 @@ import numpy as np
 from numpy.typing import NDArray
 
 from ..scene.types import Mesh, Node, Primvar, Scene
+from ..scene.material import Material
 from .export import mesh_in_world, warn_dropped
+from .mtl import material_block
 
 
-def save(scene: Scene, path: str | os.PathLike, *, precision: int = 9) -> None:
-    """`precision`: significant digits (9 is exact for float32 data, 17 for float64)."""
-    warn_dropped(scene, "OBJ")
+def save(
+    scene: Scene, path: str | os.PathLike, *, precision: int = 9, materials: bool = True, pbr_extensions: bool = False
+) -> None:
+    """Write `scene` as OBJ, plus an MTL file when nodes have material slots.
+
+    `precision`: significant digits (9 is exact for float32 data, 17 for float64).
+    `materials=False` writes geometry only. `pbr_extensions` writes the PBR MTL
+    keys (Pr, Pm, map_Pr, ...) instead of Ns / Ka / map_Ns / map_refl.
+    """
+    path = Path(path)
+    warn_dropped(scene, "OBJ", materials=not materials)
     number = f"%.{precision}g"
     lines = ["# written by sceneport"]
+    names: dict[int, str] = {}  # id(Material) -> its unique MTL name
+    used: list[Material] = []
     offsets = np.zeros(3, dtype=np.int64)  # v, vt, vn written so far (OBJ indices are global, 1-based)
     for node, mesh, vertices, normals in mesh_in_world(scene):
         if len(mesh.uvs) > 1:
@@ -47,10 +64,43 @@ def save(scene: Scene, path: str | os.PathLike, *, precision: int = 9) -> None:
             corners = corners + "/" + (uv_index + 1 + offsets[1]).astype(str)
         if normal_index is not None:
             corners = corners + ("/" if uv_index is not None else "//") + (normal_index + 1 + offsets[2]).astype(str)
-        for face in np.split(corners, np.cumsum(mesh.face_vertex_counts)[:-1]):
+        slots = _slot_names(node.materials, names, used) if materials else []
+        slot_of_face = mesh.material_indices if mesh.material_indices is not None else np.zeros(mesh.n_faces, dtype=np.int32)
+        current = None
+        for f, face in enumerate(np.split(corners, np.cumsum(mesh.face_vertex_counts)[:-1])):
+            if slots:
+                slot = int(slot_of_face[f])
+                name = slots[slot] if slot < len(slots) else ""
+                if name != current:
+                    lines.append(f"usemtl {name}".rstrip())
+                    current = name
             lines.append("f " + " ".join(face))
         offsets += [len(vertices), len(uv_values), len(normal_values)]
-    Path(path).write_text("\n".join(lines) + "\n")
+    if used:  # only materials that some node uses; the MTL file sits next to the OBJ
+        lines.insert(1, f"mtllib {path.with_suffix('.mtl').name}")
+        blocks = [f"# written by sceneport, {len(used)} materials"]
+        for material in sorted(used, key=lambda m: names[id(m)]):  # sorted by name, as Blender writes them
+            blocks += ["", *material_block(names[id(material)], material, path.parent, pbr_extensions=pbr_extensions)]
+        path.with_suffix(".mtl").write_text("\n".join(blocks) + "\n")
+    path.write_text("\n".join(lines) + "\n")
+
+
+def _slot_names(slots: list[Material | None], names: dict[int, str], used: list[Material]) -> list[str]:
+    """MTL names of a node's slots ("" for an empty slot); each Material gets one unique name."""
+    out = []
+    for material in slots:
+        if material is None:
+            out.append("")
+            continue
+        if id(material) not in names:
+            base = _obj_name(material.name)
+            name, i = base, 1
+            while name in names.values():
+                name, i = f"{base}.{i:03d}", i + 1
+            names[id(material)] = name
+            used.append(material)
+        out.append(names[id(material)])
+    return out
 
 
 def _obj_name(name: str) -> str:
