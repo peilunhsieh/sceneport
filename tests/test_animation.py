@@ -396,3 +396,21 @@ def test_point_samples_usd_roundtrip(tmp_path):
     np.testing.assert_allclose(back_clip.vertices(back.meshes[0], times), clip.vertices(mesh, times), atol=1e-6)
     with pytest.warns(UserWarning, match="per-vertex animation"):
         sceneport.save(scene, tmp_path / "w.fbx")
+
+
+def test_point_samples_animate_the_usd_extent():
+    """Viewers cull by extent (Quick Look does), so it must follow animated points."""
+    from pxr import Usd, UsdGeom
+
+    from sceneport.interop.usd import stage_from_scene
+
+    scene, mesh, clip = wobble_scene()
+    stage = stage_from_scene(scene)
+    usd_mesh = next(UsdGeom.Mesh(p) for p in stage.Traverse() if p.IsA(UsdGeom.Mesh))
+    codes = usd_mesh.GetPointsAttr().GetTimeSamples()
+    assert usd_mesh.GetExtentAttr().GetTimeSamples() == codes
+    for code in codes:
+        points = np.array(usd_mesh.GetPointsAttr().Get(code))
+        np.testing.assert_allclose(np.array(usd_mesh.GetExtentAttr().Get(code)), [points.min(0), points.max(0)])
+    rest = np.array(usd_mesh.GetExtentAttr().Get(Usd.TimeCode.Default()))
+    np.testing.assert_allclose(rest, [mesh.vertices.min(0), mesh.vertices.max(0)])  # the rest extent stays the default

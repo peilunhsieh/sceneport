@@ -12,6 +12,7 @@ from ..math import euler_matrix, quaternion_matrix, scale_matrix, translation_ma
 
 if TYPE_CHECKING:
     from .animation import Animation
+    from .camera import Camera
     from .material import Material
 
 # USD primvar interpolation names; see interop/fbx/layers.py for the FBX mapping modes.
@@ -419,6 +420,7 @@ class Node:
     joint: bool = False
     # Material slots of the node's mesh (FBX and Blender keep them per object); see Mesh.material_indices.
     materials: list[Material | None] = field(default_factory=list)
+    camera: Camera | None = None  # looks down the node's -Z axis; see scene/camera.py
     # Format-specific data kept for round trips, keyed by format, e.g. extras["fbx"].
     extras: dict[str, Any] = field(default_factory=dict)
 

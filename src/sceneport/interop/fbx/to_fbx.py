@@ -13,6 +13,7 @@ from .animation import write_animations
 from .blendshapes import write_blend_shapes
 from .binary import write
 from .binary.node import FBXNode, Prop
+from .camera import write_camera
 from .compat import prepare
 from .document import ROOT_ID, FBXDocument, FBXObject, Properties70
 from .materials import MaterialWriter, material_layer
@@ -80,6 +81,8 @@ def document_from_scene(
         ]
         model.props_index = 1  # after Version, as Blender writes it
         doc.connect(model, parent_id)
+        if node.camera is not None:
+            doc.connect(write_camera(doc, node), model)
         if node.joint:
             attribute = doc.add_object("NodeAttribute", node.name, model.subtype, cls="NodeAttribute", children=[
                 FBXNode("TypeFlags", [Prop("S", "Skeleton")]),
@@ -117,6 +120,8 @@ def document_from_scene(
 def _model_subtype(node: Node) -> str:
     if node.joint:
         return node.extras.get("fbx", {}).get("subtype", "LimbNode")
+    if node.camera is not None:
+        return "Camera"
     return "Mesh" if node.mesh is not None else "Null"
 
 

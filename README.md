@@ -129,7 +129,7 @@ sceneport convert model.usdz model.fbx  # .fbx, .usd, .usda, .usdc, .usdz, .obj,
 sceneport convert scan.ply scan.usd
 ```
 
-Meshes, blend shapes, skins, animation and materials carry over between FBX
+Meshes, blend shapes, skins, animation, materials and cameras carry over between FBX
 and USD (materials as Phong in FBX; see the conventions below). Per-vertex
 animation (time-sampled points) is kept by USD only. For Blender, FBX export
 splits in-between shapes into plain ones and rewrites mirrored joints (negative

@@ -59,6 +59,7 @@ from pxr import Gf, Sdf, Tf, Usd, UsdGeom, UsdShade, UsdSkel, UsdUtils, Vt
 
 from ..math import (
     ROTATION_ORDERS,
+    complete_rotation,
     decompose_matrix,
     euler_from_matrix,
     quaternion_continuity,
@@ -66,6 +67,7 @@ from ..math import (
     quaternion_matrix,
 )
 from ..scene.animation import Animation, Channel, PointSamples, rest_value
+from ..scene.camera import Camera
 from ..scene.material import AssetPath, Connection, Material, NodeGraph, Port, ShaderNode
 from ..scene.pbr import NATIVE_SURFACES, native_surface, preview_surface_nodes
 from .export import texture_path
@@ -75,7 +77,7 @@ from ..scene.types import BlendShape, Inbetween, Mesh, Node, Primvar, Scene, Ski
 EXTENSIONS = (".usd", ".usda", ".usdc", ".usdz")
 NAME_KEY = "sceneport:name"  # customData: a primvar's original name
 JOINT_KEY = "sceneport:joint"  # customData: joint token an attachment hangs from
-GENERATED_KEY = "sceneport:generated"  # customData: SkelRoot added only to satisfy UsdSkel
+GENERATED_KEY = "sceneport:generated"  # customData: a prim added only for USD's sake (dropped on load)
 JOINT_OP = "sceneportJoint"  # xformOp suffix placing an attachment at its joint
 ACTIVE_CLIP_KEY = "sceneport:activeClip"  # root layer customLayerData: name of the clip on the timeline
 FBX_TYPE_KEY = "sceneport:fbxType"  # customData of a shader port: its FBX [type, subtype, flags], if not the inferred one
@@ -304,22 +306,30 @@ class _Writer:
             self.stage.SetStartTimeCode(_time_code(start, self.fps))
             self.stage.SetEndTimeCode(_time_code(end, self.fps))
             self.stage.GetRootLayer().customLayerData = {ACTIVE_CLIP_KEY: self.active.name}
+        # One top-level prim, the default prim: viewers and references (e.g. Apple's Quick Look) only show
+        # the default prim's subtree. Several top-level nodes go under a generated "root" Xform.
+        top_level = len([n for n in self.scene.nodes if n not in self.wrapped]) + bool(self.wrapped)
+        parent = Sdf.Path.absoluteRootPath
+        if top_level > 1:
+            parent = parent.AppendChild("root")
+            UsdGeom.Xform.Define(self.stage, parent).GetPrim().SetCustomDataByKey(GENERATED_KEY, True)
         taken: set[str] = set()
         root_paths = []
         wrapper: tuple[Sdf.Path, set[str]] | None = None
         for node in self.scene.nodes:
             if node in self.wrapped:
                 if wrapper is None:
-                    path = Sdf.Path.absoluteRootPath.AppendChild(_prim_name("SkelRoot", taken))
+                    path = parent.AppendChild(_prim_name("SkelRoot", taken))
                     UsdSkel.Root.Define(self.stage, path).GetPrim().SetCustomDataByKey(GENERATED_KEY, True)
                     wrapper = (path, set())
                     root_paths.append(path)
                 self._write_node(wrapper[0], node, wrapper[1])
-            elif (path := self._write_node(Sdf.Path.absoluteRootPath, node, taken)) is not None:
+            elif (path := self._write_node(parent, node, taken)) is not None:
                 root_paths.append(path)
-        if root_paths:
-            self.stage.SetDefaultPrim(self.stage.GetPrimAtPath(root_paths[0]))
-        self._write_materials(root_paths[0] if root_paths else Sdf.Path.absoluteRootPath)
+        default = parent if top_level > 1 else (root_paths[0] if root_paths else None)
+        if default is not None:
+            self.stage.SetDefaultPrim(self.stage.GetPrimAtPath(default))
+        self._write_materials(default if default is not None else Sdf.Path.absoluteRootPath)
         self._finish()
 
     def _write_node(
@@ -335,8 +345,15 @@ class _Writer:
         mesh = node.mesh
         own_skeleton = mesh is not None and bool(mesh.blend_shapes) and mesh.skin is None
         prim_type = UsdSkel.Root if own_skeleton or node in self.skel_roots else UsdGeom.Xform
+        if node.camera is not None:
+            if prim_type is UsdGeom.Xform:
+                prim_type = UsdGeom.Camera
+            else:
+                warnings.warn(f"{node.name!r}: a camera can't share its prim with a SkelRoot; camera not written")
         xform = prim_type.Define(self.stage, path)
         _set_display_name(xform.GetPrim(), node.name)
+        if prim_type is UsdGeom.Camera:
+            _write_camera(UsdGeom.Camera(xform.GetPrim()), node.camera, self.scene.meters_per_unit)
         if joint is not None:  # attachment of a joint: start at the joint's rest pose
             token, matrix = joint
             xform.AddTransformOp(precision=_DOUBLE, opSuffix=JOINT_OP).Set(Gf.Matrix4d(matrix.T.tolist()))
@@ -442,10 +459,15 @@ class _Writer:
         else:
             usd_mesh = _write_mesh(self.stage, path, mesh)
             self.written[id(mesh)] = path
-            if id(mesh) in self.active_points:  # the rest points stay the default value
-                samples, attr = self.active_points[id(mesh)], usd_mesh.GetPointsAttr()
+            if id(mesh) in self.active_points:  # the rest points (and extent) stay the default value
+                samples = self.active_points[id(mesh)]
+                points_attr, extent_attr = usd_mesh.GetPointsAttr(), usd_mesh.GetExtentAttr()
                 for t, points in zip(samples.times, samples.points):
-                    attr.Set(Vt.Vec3fArray.FromNumpy(np.ascontiguousarray(points, dtype=np.float32)), _time_code(t, self.fps))
+                    code = _time_code(t, self.fps)
+                    points = np.ascontiguousarray(points, dtype=np.float32)
+                    points_attr.Set(Vt.Vec3fArray.FromNumpy(points), code)
+                    if len(points):  # the extent must follow the points, or viewers cull the mesh (Quick Look does)
+                        extent_attr.Set(Vt.Vec3fArray.FromNumpy(np.stack([points.min(0), points.max(0)])), code)
         _set_display_name(usd_mesh.GetPrim(), mesh.name)
         return usd_mesh
 
@@ -533,7 +555,8 @@ class _Writer:
             # A mirrored joint (negative determinant) needs a negative scale, or the rotation isn't one:
             # negating all three keeps it proper and matches the usual (-1, -1, -1) of mirrored rigs.
             scales *= np.where(np.linalg.det(local[..., :3, :3]) < 0, -1.0, 1.0)[..., None]
-            rotations = quaternion_from_matrix(local[..., :3, :3] / np.where(scales == 0, 1, scales)[..., None, :])
+            unit = local[..., :3, :3] / np.where(scales == 0, 1, scales)[..., None, :]
+            rotations = quaternion_from_matrix(complete_rotation(unit, scales != 0))  # zero-scale axes completed
             for f in range(1, len(times)):  # keep each joint's quaternion signs continuous over time
                 rotations[f] *= np.where(np.sum(rotations[f] * rotations[f - 1], axis=-1, keepdims=True) < 0, -1, 1)
             animation.CreateJointsAttr(Vt.TokenArray([plan.tokens[j] for j in plan.joints]))
@@ -706,6 +729,46 @@ def _asset_path(asset: AssetPath, node: ShaderNode | None, directory: Path | Non
     return texture_path(asset, directory, content=content, fallback_name=fallback, drop_missing=drop_missing)
 
 
+def _lens_unit_mm(meters_per_unit: float) -> float:
+    """Millimeters per USD lens unit: focal length and apertures are in tenths of a scene unit."""
+    return 100.0 * meters_per_unit
+
+
+def _write_camera(usd_camera: UsdGeom.Camera, camera: Camera, meters_per_unit: float) -> None:
+    mm = _lens_unit_mm(meters_per_unit)
+    usd_camera.CreateProjectionAttr(camera.projection)
+    usd_camera.CreateFocalLengthAttr(camera.focal_length / mm)
+    usd_camera.CreateHorizontalApertureAttr(camera.horizontal_aperture / mm)
+    usd_camera.CreateVerticalApertureAttr(camera.vertical_aperture / mm)
+    usd_camera.CreateHorizontalApertureOffsetAttr(camera.horizontal_aperture_offset / mm)
+    usd_camera.CreateVerticalApertureOffsetAttr(camera.vertical_aperture_offset / mm)
+    usd_camera.CreateClippingRangeAttr(Gf.Vec2f(camera.near, camera.far))
+    if camera.focus_distance is not None:
+        usd_camera.CreateFocusDistanceAttr(camera.focus_distance)
+    if camera.f_stop is not None:
+        usd_camera.CreateFStopAttr(camera.f_stop)
+
+
+def _read_camera(prim: Usd.Prim, meters_per_unit: float) -> Camera:
+    """A Camera prim's lens (schema defaults where unauthored); USD's lens units converted to mm."""
+    usd_camera, mm = UsdGeom.Camera(prim), _lens_unit_mm(meters_per_unit)
+    near, far = _static_value(usd_camera.GetClippingRangeAttr())
+    focus = _static_value(usd_camera.GetFocusDistanceAttr())
+    f_stop = _static_value(usd_camera.GetFStopAttr())
+    return Camera(
+        projection=str(_static_value(usd_camera.GetProjectionAttr())),
+        focal_length=float(_static_value(usd_camera.GetFocalLengthAttr())) * mm,
+        horizontal_aperture=float(_static_value(usd_camera.GetHorizontalApertureAttr())) * mm,
+        vertical_aperture=float(_static_value(usd_camera.GetVerticalApertureAttr())) * mm,
+        horizontal_aperture_offset=float(_static_value(usd_camera.GetHorizontalApertureOffsetAttr())) * mm,
+        vertical_aperture_offset=float(_static_value(usd_camera.GetVerticalApertureOffsetAttr())) * mm,
+        near=float(near),
+        far=float(far),
+        focus_distance=float(focus) if focus else None,  # 0 = unset
+        f_stop=float(f_stop) if f_stop else None,  # 0 = no depth of field
+    )
+
+
 def _time_code(seconds: float, fps: float) -> float:
     """Seconds -> time code, snapped to whole frames when floating-point noise is all that's off."""
     code = float(seconds) * fps
@@ -861,6 +924,7 @@ class _Reader:
 
     def read(self, stage: Usd.Stage, scene: Scene) -> None:
         self.fps = stage.GetTimeCodesPerSecond()
+        self.meters_per_unit = scene.meters_per_unit
         for prim in stage.Traverse(_PREDICATE):  # every material, in stage order; bound ones are shared from here
             if prim.IsA(UsdShade.Material):
                 self.get_material(prim)
@@ -876,13 +940,15 @@ class _Reader:
             self.read_skeleton(prim, siblings)
             return
         children = list(prim.GetFilteredChildren(_PREDICATE))
-        generated = prim.IsA(UsdSkel.Root) and prim.GetCustomDataByKey(GENERATED_KEY)
+        generated = prim.GetCustomDataByKey(GENERATED_KEY)  # a wrapper sceneport added (root Xform, SkelRoot)
         if generated or not prim.IsA(UsdGeom.Xformable):  # Scope, Material, ...: no transform, keep looking below
             for child in children:
                 self.read_prim(child, siblings)
             return
 
         node = Node(_display_name(prim), _read_transform(UsdGeom.Xformable(prim)))
+        if prim.IsA(UsdGeom.Camera):
+            node.camera = _read_camera(prim, self.meters_per_unit)
         siblings.append(node)
         self.read_node_samples(UsdGeom.Xformable(prim), node)
         if prim.IsA(UsdGeom.Mesh):

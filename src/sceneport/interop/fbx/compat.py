@@ -1,6 +1,7 @@
 """Scene rewrites applied before writing FBX, for readers that can't handle everything FBX can hold.
 
-Both keep what the scene looks like at every frame; they change how it's expressed:
+Both keep what the scene looks like at every frame; they change how it's expressed.
+(Cameras are also turned from looking down -Z to FBX's +X here, always; see reframe.)
 
 - split_inbetweens: Blender's FBX importer refuses in-between shapes. A shape's
   weight interpolates linearly through its in-betweens, so it equals a sum of
@@ -32,6 +33,9 @@ from ...scene.types import BlendShape, Mesh, Node, Scene, Skin, Transform
 
 FLIP = -np.eye(4)
 FLIP[3, 3] = 1.0  # -I on the linear part: a point reflection
+# A camera looking down -Z (sceneport, USD) turned to look down +X (FBX): a 90 degree turn about Y,
+# as Blender's FBX exporter does (MAT_CONVERT_CAMERA).
+CAMERA_TO_FBX = np.array([[0.0, 0, 1, 0], [0, 1, 0, 0], [-1, 0, 0, 0], [0, 0, 0, 1]])
 
 
 def prepare(scene: Scene, *, unmirror_joints: bool = True, split_inbetweens: bool = True) -> Scene:
@@ -42,6 +46,9 @@ def prepare(scene: Scene, *, unmirror_joints: bool = True, split_inbetweens: boo
         flipped = _mirrored_joints(scene)
         if flipped:
             scene = _unmirror(scene, flipped)
+    cameras = [node for node, _ in scene.walk() if node.camera is not None]
+    if cameras:  # always: FBX cameras look down +X
+        scene = reframe(scene, {node: CAMERA_TO_FBX for node in cameras})
     return scene
 
 
@@ -157,22 +164,34 @@ def _mirrored_joints(scene: Scene) -> set[Node]:
 
 
 def _unmirror(scene: Scene, flipped: set[Node]) -> Scene:
+    return reframe(scene, {node: FLIP for node in flipped})
+
+
+def reframe(scene: Scene, frames: dict[Node, NDArray]) -> Scene:
+    """Turn the local frame of each node in `frames` by its matrix F without moving anything:
+    world' = world @ F, so local' = F_parent^-1 @ local @ F_self, a mesh's geometric transform
+    becomes F^-1 @ geometric and a joint's inverse bind F^-1 @ inverse bind. Animated nodes whose
+    local matrix changes are baked per frame. Used to unmirror joints and to turn cameras
+    between the -Z (USD) and +X (FBX) view axes.
+    """
     parents = scene.parents()
+    inverse = {node: np.linalg.inv(f) for node, f in frames.items()}
 
-    def frame(node: Node | None) -> NDArray:
-        return FLIP if node in flipped else np.eye(4)
+    def local_frame(node: Node, local: NDArray) -> NDArray:
+        parent = parents[node]
+        return inverse.get(parent, np.eye(4)) @ local @ frames.get(node, np.eye(4))
 
-    affected = {node for node in parents if node in flipped or parents[node] in flipped}
+    affected = {node for node in parents if node in frames or parents[node] in frames}
     transforms = {}
     for node in affected:
-        local = frame(parents[node]) @ node.transform.matrix() @ frame(node)
-        transforms[node] = _transform(local, node.transform)
+        geometric = inverse[node] @ node.transform.geometric_matrix() if node in frames and node.mesh is not None else None
+        transforms[node] = _transform(local_frame(node, node.transform.matrix()), node.transform, geometric)
 
     meshes = {}
     for mesh in scene.meshes:
-        if mesh.skin is not None and any(j in flipped for j in mesh.skin.joints):
-            flips = np.stack([frame(j) for j in mesh.skin.joints])
-            meshes[id(mesh)] = dataclasses.replace(mesh, skin=dataclasses.replace(mesh.skin, inverse_bind=flips @ mesh.skin.inverse_bind))
+        if mesh.skin is not None and any(j in frames for j in mesh.skin.joints):
+            turns = np.stack([inverse.get(j, np.eye(4)) for j in mesh.skin.joints])
+            meshes[id(mesh)] = dataclasses.replace(mesh, skin=dataclasses.replace(mesh.skin, inverse_bind=turns @ mesh.skin.inverse_bind))
 
     def channels(clip: Animation) -> list[Channel]:
         animated = [n for n in affected if any(c.target is n for c in clip.channels)]
@@ -181,7 +200,7 @@ def _unmirror(scene: Scene, flipped: set[Node]) -> Scene:
         out = [c for c in clip.channels if c.is_blend_shape or c.target not in animated]
         for node in animated:
             times = _key_times(clip, [c for c in clip.channels if c.target is node])
-            local = frame(parents[node]) @ node.transform.matrix(**clip.node_values(times)[node]) @ frame(node)
+            local = local_frame(node, node.transform.matrix(**clip.node_values(times)[node]))
             translation, rotation, scale = decompose_matrix(local, node.transform.rotation_order)
             rotation = np.degrees(np.unwrap(np.radians(rotation), axis=0))
             for prop, values in (("translation", translation), ("rotation", rotation), ("scale", scale)):
@@ -191,11 +210,15 @@ def _unmirror(scene: Scene, flipped: set[Node]) -> Scene:
     return _copy(scene, meshes, transforms, channels)
 
 
-def _transform(local: NDArray, original: Transform) -> Transform:
-    """A plain translation / rotation / scale Transform for `local`, keeping the rotation order and geometric part."""
+def _transform(local: NDArray, original: Transform, geometric: NDArray | None = None) -> Transform:
+    """A plain translation / rotation / scale Transform for `local`, keeping the rotation order and
+    the geometric part (or taking it from the `geometric` matrix)."""
     translation, rotation, scale = decompose_matrix(local, original.rotation_order)
+    if geometric is None:
+        g_translation, g_rotation, g_scale = original.geometric_translation, original.geometric_rotation, original.geometric_scale
+    else:
+        g_translation, g_rotation, g_scale = decompose_matrix(geometric)
     return Transform(
         translation=translation, rotation=rotation, scale=scale, rotation_order=original.rotation_order,
-        geometric_translation=original.geometric_translation, geometric_rotation=original.geometric_rotation,
-        geometric_scale=original.geometric_scale,
+        geometric_translation=g_translation, geometric_rotation=g_rotation, geometric_scale=g_scale,
     )  # fmt: skip

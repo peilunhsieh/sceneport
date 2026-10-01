@@ -174,3 +174,15 @@ def test_read_foreign_stage():
     expected = UsdGeom.Xformable(stage.GetPrimAtPath("/Geo/Quad")).GetLocalTransformation()
     np.testing.assert_allclose(node.transform.matrix(), np.array(expected).T, atol=1e-12)
     assert scene.meters_per_unit == 0.01  # USD's fallback when unauthored
+
+
+def test_several_top_level_nodes_share_a_default_root():
+    """Viewers such as Apple's Quick Look only show the default prim, so everything must be under it."""
+    scene = Scene(nodes=[Node("A", mesh=mixed_mesh()), Node("B"), Node("C")])
+    stage = stage_from_scene(scene)
+    assert stage.GetDefaultPrim().GetPath() == "/root"
+    assert [p.GetName() for p in stage.GetPseudoRoot().GetChildren()] == ["root"]
+    back = scene_from_stage(stage)
+    assert [n.name for n in back.nodes] == ["A", "B", "C"]  # the generated root is dropped on load
+    single = stage_from_scene(Scene(nodes=[Node("Only", mesh=mixed_mesh())]))
+    assert single.GetDefaultPrim().GetPath() == "/Only"  # one top-level node is the default prim itself

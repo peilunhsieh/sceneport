@@ -127,15 +127,44 @@ def quaternion_continuity(q: ArrayLike) -> NDArray[np.float64]:
 def decompose_matrix(m: ArrayLike, order: int | str = 0) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:
     """Split 4x4 matrices into (translation, Euler degrees for `order`, scale). Shear is lost.
 
-    A mirrored matrix (negative determinant) gets a negative X scale.
+    A mirrored matrix (negative determinant) gets a negative X scale. An axis with zero
+    scale (e.g. a node squashed flat to hide it) has no direction of its own; it gets one
+    that completes the others to a rotation, which recomposes to the same matrix.
     """
     m = np.asarray(m, dtype=np.float64)
     translation = m[..., :3, 3].copy()
     basis = m[..., :3, :3]
     scale = np.linalg.norm(basis, axis=-2)
     scale[..., 0] = np.where(np.linalg.det(basis) < 0, -scale[..., 0], scale[..., 0])
-    rotation = basis / np.where(scale == 0, 1, scale)[..., None, :]
+    rotation = complete_rotation(basis / np.where(scale == 0, 1, scale)[..., None, :], scale != 0)
     return translation, euler_from_matrix(rotation, order), scale
+
+
+def complete_rotation(columns: ArrayLike, valid: ArrayLike) -> NDArray[np.float64]:
+    """Fill the columns of (..., 3, 3) matrices not marked `valid` (..., 3) so each matrix is a rotation.
+
+    Valid columns must be unit length and orthogonal. One missing column is the cross product of the
+    other two; with two missing, the remaining axis is completed with any perpendicular pair; with
+    none valid, the identity.
+    """
+    out = np.array(columns, dtype=np.float64)
+    valid = np.broadcast_to(np.asarray(valid, dtype=bool), out.shape[:-1]).reshape(-1, 3)
+    flat = out.reshape(-1, 3, 3)  # a view: filling it fills `out`
+    for index in np.flatnonzero(~valid.all(axis=-1)):  # only the degenerate matrices
+        m, ok = flat[index], valid[index]
+        known = list(np.flatnonzero(ok))
+        if not known:
+            flat[index] = np.eye(3)
+            continue
+        if len(known) == 1:
+            j = known[0]
+            v = m[:, j]
+            helper = np.eye(3)[np.argmin(np.abs(v))]  # the axis least parallel to v
+            m[:, (j + 1) % 3] = np.cross(v, helper) / np.linalg.norm(np.cross(v, helper))
+            known.append((j + 1) % 3)
+        (missing,) = {0, 1, 2} - set(known)
+        m[:, missing] = np.cross(m[:, (missing + 1) % 3], m[:, (missing + 2) % 3])  # right-handed
+    return out
 
 
 def seconds_to_ticks(seconds: float) -> int:

@@ -13,6 +13,8 @@ from .animation import fps_from_settings, read_animations
 from .blendshapes import read_blend_shapes
 from .binary import read
 from .document import FBXDocument, FBXObject
+from .camera import read_camera
+from .compat import CAMERA_TO_FBX, reframe
 from .materials import read_material_indices, read_material_slots, read_materials
 from .settings import read_global_settings
 from .skin import JOINT_SUBTYPES, read_skin
@@ -35,6 +37,8 @@ def scene_from_document(doc: FBXDocument, directory: str | None = None) -> Scene
     models = list(doc.iter_objects("Model"))
     for model in models:
         node = nodes[model.id] = Node(model.name, _read_transform(doc, model), joint=model.subtype in JOINT_SUBTYPES)
+        if model.subtype == "Camera":
+            node.camera = read_camera(doc, model)
         if node.joint and model.subtype != "LimbNode":
             node.extras["fbx"] = {"subtype": model.subtype}  # e.g. "Root"; LimbNode is the default on write
         for geom in doc.children_of(model, "Geometry"):
@@ -61,6 +65,9 @@ def scene_from_document(doc: FBXDocument, directory: str | None = None) -> Scene
     for geom_id, mesh in meshes.items():
         mesh.skin = read_skin(doc, doc.objects[geom_id], mesh.n_vertices, nodes)
     scene.animations = read_animations(doc, nodes, shapes, fps_from_settings(doc.global_settings))
+    cameras = [node for node in nodes.values() if node.camera is not None]
+    if cameras:  # FBX cameras look down +X; sceneport's down -Z
+        scene = reframe(scene, {node: np.linalg.inv(CAMERA_TO_FBX) for node in cameras})
     return scene
 
 

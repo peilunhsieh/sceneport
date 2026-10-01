@@ -112,6 +112,11 @@ future changes can keep them consistent (or revisit them deliberately).
 - USD: written as an xformOp stack that reproduces the formula exactly
   (pivots via inverse ops); that stack is read back exactly, other stacks are
   decomposed from the local matrix (shear is lost).
+- Decomposing a matrix: a mirror (negative determinant) becomes a negative X
+  scale; an axis with zero scale (a node squashed flat, e.g. to hide it) has
+  no direction, so it gets one that completes the others to a rotation. Any
+  completion recomposes to the same matrix; guessing from the zero columns
+  would turn the remaining axes too.
 
 ## Blend shapes
 
@@ -134,7 +139,11 @@ future changes can keep them consistent (or revisit them deliberately).
   sliders default to 0–1), so ranges are set on the tool side.
 - USD: BlendShape prims under the Mesh; weights in a SkelAnimation — on the
   mesh's skeleton if skinned, otherwise on a jointless Skeleton under a
-  SkelRoot made from the node.
+  SkelRoot made from the node. Apple's Quick Look shows nothing for these
+  (it ignores a jointless Skeleton); accepted, since the files are valid USD
+  and other tools read them. Exporters differ here: Maya's (maya-usd) also
+  writes a jointless Skeleton, Blender's writes one dummy joint (`joint1`,
+  every point bound to it) because "some DCCs seem to require joint names".
 
 ## Rigs
 
@@ -158,6 +167,13 @@ future changes can keep them consistent (or revisit them deliberately).
   at their joint's rest pose and re-attached on load. Mesh and Skeleton get a
   common SkelRoot (their nearest shared ancestor, or a generated wrapper that
   is dropped again on load). Only linear blend skinning is supported.
+- USD reading resolves a Skeleton's animation like UsdSkel does: its own
+  `skel:animationSource`, or one inherited from an ancestor (Pixar's UsdSkel
+  examples bind it on the SkelRoot).
+- USD SkelAnimations store translation, quaternion and scale per joint, so a
+  mirrored joint (negative determinant, e.g. a rig's right side) must keep its
+  reflection in the scale (written as (-1, -1, -1) x size); positive scales
+  would turn the reflection into a wrong rotation.
 
 ## Materials
 
@@ -215,8 +231,9 @@ future changes can keep them consistent (or revisit them deliberately).
   material). USD binds slot 0 to the mesh, or writes one `materialBind`
   GeomSubset per slot; a shared mesh's later prims block the bindings they
   bring along from the first one, so each node gets exactly its own slots.
-- **Texture files:** USD paths are made relative to the written file when the
-  texture exists on disk; FBX-embedded images are written to a `textures`
+- **Texture files:** USD, OBJ and FBX paths (FBX: RelativeFilename, with the
+  absolute FileName next to it) are made relative to the written file when the
+  texture exists on disk, as Blender does; FBX-embedded images are written to a `textures`
   folder next to the USD file (inside the package for `.usdz`, which leaves out
   textures it can't find, with a warning). PLY drops materials.
 - **OBJ writes an MTL file** next to it (interop/mtl.py), following Blender's
@@ -249,6 +266,33 @@ future changes can keep them consistent (or revisit them deliberately).
     `unmirror_joints=False` keeps the negative scales (Maya reads them).
 - Key times are merged on whole FBX ticks: two float times for the same frame
   must not become two keys on one tick, which Blender's importer misreads.
+
+## USD stage layout
+
+- One top-level prim, which is the stage's default prim: viewers and
+  references only see the default prim's subtree (Apple's Quick Look shows
+  nothing else). A scene with several top-level nodes is written under a
+  generated `root` Xform (as Blender's exporter does), tagged in customData
+  and dropped again on load; a single top-level node is the default prim itself.
+- Materials go in a `_materials` Scope under the default prim.
+- `metersPerUnit` is read even when an old writer stored it as a float
+  (Blender 2.80), which USD's typed getter rejects.
+
+## Cameras
+
+- `Node.camera` (scene/camera.py): lens settings on a node; the node's
+  transform places and aims it, looking down local -Z with +Y up (USD, glTF,
+  Blender). Physical units: focal length, apertures and offsets in mm,
+  clipping and focus distance in scene units.
+- USD: the node's prim is a `Camera`; lens values are in tenths of a scene unit
+  (mm per unit = 100 x metersPerUnit, as Blender converts).
+- FBX: a camera Model with a "Camera" NodeAttribute (film sizes in inches).
+  FBX cameras look down +X, so camera nodes are turned 90 degrees about Y on
+  write and back on read (`compat.reframe`, which also keeps their children in
+  place), as Blender's exporter does.
+- Viewers that frame a scene with its camera (Apple's Quick Look) need it: a
+  scene's bounds can be useless (e.g. a node squashed to zero scale makes
+  USD's bounds ~1e38).
 
 ## Animation
 
@@ -294,4 +338,6 @@ future changes can keep them consistent (or revisit them deliberately).
   between samples, held outside), which replace the rest positions before blend
   shapes and skinning (`Animation.vertices` / `skinned_vertices`). USD reads and
   writes them as time-sampled `points` on the Mesh prim (timeline clip only,
-  rest points kept as the default). FBX, OBJ and PLY can't hold them and warn.
+  rest points kept as the default), with the mesh's `extent` time-sampled
+  alongside: viewers cull by extent (Quick Look stops drawing a mesh whose
+  points left a stale one). FBX, OBJ and PLY can't hold them and warn.

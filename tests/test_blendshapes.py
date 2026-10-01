@@ -218,14 +218,15 @@ def test_usd_layout_and_usdskel_evaluation():
     mesh = shaped_mesh()
     scene = Scene(nodes=[Node("A", mesh=mesh), Node("B", mesh=mesh), Node("Plain", mesh=mixed_mesh())])
     stage = stage_from_scene(scene)
-    assert stage.GetPrimAtPath("/A").GetTypeName() == "SkelRoot"
-    assert stage.GetPrimAtPath("/Plain").GetTypeName() == "Xform"  # no shapes: no skeleton
-    binding = UsdSkel.BindingAPI(stage.GetPrimAtPath("/A/Mixed"))
+    assert stage.GetDefaultPrim().GetPath() == "/root"  # several top-level nodes share one generated root
+    assert stage.GetPrimAtPath("/root/A").GetTypeName() == "SkelRoot"
+    assert stage.GetPrimAtPath("/root/Plain").GetTypeName() == "Xform"  # no shapes: no skeleton
+    binding = UsdSkel.BindingAPI(stage.GetPrimAtPath("/root/A/Mixed"))
     assert list(binding.GetBlendShapesAttr().Get()) == ["Smile_L", "Wide"]
-    assert stage.GetPrimAtPath("/A/Mixed/Smile_L").GetDisplayName() == "Smile.L"
+    assert stage.GetPrimAtPath("/root/A/Mixed/Smile_L").GetDisplayName() == "Smile.L"
 
     assert UsdSkel.BakeSkinning(stage.Traverse())
-    for path in ("/A/Mixed", "/B/Mixed"):
+    for path in ("/root/A/Mixed", "/root/B/Mixed"):
         baked = np.array(UsdGeom.Mesh(stage.GetPrimAtPath(path)).GetPointsAttr().Get(Usd.TimeCode.EarliestTime()))
         np.testing.assert_allclose(baked, mesh.deformed_vertices(), atol=1e-6, err_msg=path)
 

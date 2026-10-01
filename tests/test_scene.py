@@ -202,3 +202,16 @@ def test_unterminated_polygon_warns():
         mesh = scene_from_document(doc).meshes[0]
     np.testing.assert_array_equal(mesh.face_vertex_counts, [3])
     np.testing.assert_array_equal(mesh.face_vertex_indices, [0, 1, 2])
+
+
+@pytest.mark.parametrize("scale", [(0.0, 0.0, 2.0), (0.0, 1.5, 0.7), (3.0, 0.0, 0.0), (0.0, 0.0, 0.0), (-1.0, 0.0, 2.0)])
+def test_decompose_zero_scale_recomposes(scale):
+    """A node squashed to zero along some axes (e.g. hidden by animation) must recompose to the same matrix."""
+    from sceneport.math import decompose_matrix, euler_matrix
+
+    matrix = Transform(translation=[0.3, -0.5, 0.7], rotation=[25, -60, 140], scale=scale).matrix()
+    translation, rotation, decomposed_scale = decompose_matrix(matrix)
+    back = Transform(translation=translation, rotation=rotation, scale=decomposed_scale).matrix()
+    np.testing.assert_allclose(back, matrix, atol=1e-12)
+    batched = decompose_matrix(np.stack([matrix, np.eye(4)]))  # degenerate and regular matrices together
+    np.testing.assert_allclose(batched[2], [decomposed_scale, [1, 1, 1]], atol=1e-12)
