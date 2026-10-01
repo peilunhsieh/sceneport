@@ -274,6 +274,8 @@ future changes can keep them consistent (or revisit them deliberately).
   nothing else). A scene with several top-level nodes is written under a
   generated `root` Xform (as Blender's exporter does), tagged in customData
   and dropped again on load; a single top-level node is the default prim itself.
+  The wrapper also carries Blender's own tag (`Blender:generated`), so Blender's
+  importer skips it like the `/root` of its own exports instead of adding an empty.
 - Materials go in a `_materials` Scope under the default prim.
 - `metersPerUnit` is read even when an old writer stored it as a float
   (Blender 2.80), which USD's typed getter rejects.

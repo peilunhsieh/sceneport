@@ -182,6 +182,7 @@ def test_several_top_level_nodes_share_a_default_root():
     stage = stage_from_scene(scene)
     assert stage.GetDefaultPrim().GetPath() == "/root"
     assert [p.GetName() for p in stage.GetPseudoRoot().GetChildren()] == ["root"]
+    assert stage.GetPrimAtPath("/root").GetCustomDataByKey("Blender:generated")  # Blender's importer skips it
     back = scene_from_stage(stage)
     assert [n.name for n in back.nodes] == ["A", "B", "C"]  # the generated root is dropped on load
     single = stage_from_scene(Scene(nodes=[Node("Only", mesh=mixed_mesh())]))

@@ -312,7 +312,9 @@ class _Writer:
         parent = Sdf.Path.absoluteRootPath
         if top_level > 1:
             parent = parent.AppendChild("root")
-            UsdGeom.Xform.Define(self.stage, parent).GetPrim().SetCustomDataByKey(GENERATED_KEY, True)
+            root = UsdGeom.Xform.Define(self.stage, parent).GetPrim()
+            root.SetCustomDataByKey(GENERATED_KEY, True)
+            root.SetCustomDataByKey("Blender:generated", True)  # Blender's own tag: its importer then skips it too
         taken: set[str] = set()
         root_paths = []
         wrapper: tuple[Sdf.Path, set[str]] | None = None
