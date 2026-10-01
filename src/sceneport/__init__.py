@@ -7,7 +7,7 @@ from pathlib import Path  # noqa: E402
 
 from .scene import (  # noqa: E402
     AXES, Animation, AssetPath, BlendShape, Channel, Connection, Inbetween, Material, Mesh, Node, NodeGraph, Port,
-    Primvar, Scene, ShaderNode, Skin, Transform,
+    PointSamples, Primvar, Scene, ShaderNode, Skin, Transform,
 )  # fmt: skip
 
 
@@ -37,5 +37,5 @@ def _format_for(path: str | os.PathLike):
 
 __all__ = [
     "Scene", "Node", "Mesh", "Primvar", "Transform", "BlendShape", "Inbetween", "Skin", "Animation", "Channel",
-    "Material", "ShaderNode", "NodeGraph", "Port", "Connection", "AssetPath", "AXES", "load", "save",
+    "PointSamples", "Material", "ShaderNode", "NodeGraph", "Port", "Connection", "AssetPath", "AXES", "load", "save",
 ]

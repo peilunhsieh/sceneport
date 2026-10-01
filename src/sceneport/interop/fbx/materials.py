@@ -35,6 +35,7 @@ from numpy.typing import NDArray
 from ...scene.material import AssetPath, Connection, Material, Port, ShaderNode
 from ...scene.pbr import FBX_SURFACES, PBRMaterial, TextureRef, native_surface
 from ...scene.types import Node
+from ..export import texture_path
 from .binary.node import FBXNode, Prop
 from .document import NAME_SEP, FBXDocument, FBXObject, Properties70, Property
 from .layers import _value
@@ -185,8 +186,9 @@ def fbx_surface(material: Material) -> ShaderNode | None:
 class MaterialWriter:
     """Writes Materials once each and connects them to Models as slots."""
 
-    def __init__(self, doc: FBXDocument):
+    def __init__(self, doc: FBXDocument, directory: str | os.PathLike | None = None):
         self.doc = doc
+        self.directory = directory  # where the FBX is written: RelativeFilename is made relative to it
         self.written: dict[int, FBXObject] = {}  # id(Material) -> Material object
         self.default: FBXObject | None = None  # stands in for empty (None) slots
 
@@ -260,7 +262,13 @@ class MaterialWriter:
 
     def _texture_object(self, name: str, props: Properties70, file: AssetPath | None, content: bytes | None,
                         relative: str | None = None, absolute: str | None = None) -> FBXObject:  # fmt: skip
-        """A Texture (and its Video) laid out as Blender writes them."""
+        """A Texture (and its Video) laid out as Blender writes them.
+
+        A texture found on disk gets a RelativeFilename relative to the written FBX (as Blender writes it)
+        and its absolute path as FileName; otherwise the paths are kept as they were.
+        """
+        if file is not None and file.resolved and os.path.isfile(file.resolved) and self.directory is not None:
+            relative, absolute = texture_path(file, self.directory), file.resolved
         relative = relative or (file.path if file is not None else "")
         absolute = absolute or (file.resolved or file.path if file is not None else "")
         texture = self.doc.add_object("Texture", name, children=[

@@ -187,7 +187,9 @@ def _euler_channels(clip: Animation) -> list[Channel]:
         if any(c.target is node and c.property == "rotation" for c in out):
             warnings.warn(f"{node.name!r} has rotation and orientation channels; FBX keeps the orientation")
             out = [c for c in out if not (c.target is node and c.property == "rotation")]
-        times = np.union1d(clip.frame_times(), np.concatenate([c.times for c in channels]))
+        # Merged on whole ticks: the same frame computed two ways (e.g. 103 / 24) differs in the last float bit
+        # and would otherwise become two keys on one tick, which Blender's importer misreads.
+        times = _ticks_to_seconds(np.unique(_seconds_to_ticks(np.concatenate([clip.frame_times(), *(c.times for c in channels)]))))
         quaternions = clip.node_values(times)[node]["orientation"]
         euler = euler_from_matrix(quaternion_matrix(quaternions), node.transform.rotation_order)
         euler = np.degrees(np.unwrap(np.radians(euler), axis=0))  # no 360-degree jumps between keys
@@ -224,6 +226,12 @@ def _write_curve_node(doc, layer, channels: list[Channel], models, shape_channel
 
 
 def _curve_object(doc, channel: Channel, scale: float, default: float) -> FBXObject:
+    ticks = _seconds_to_ticks(channel.times)
+    keep = np.concatenate([[True], np.diff(ticks) != 0])
+    if not keep.all():  # keys closer than a tick: keep the first (FBX readers expect increasing times)
+        channel = Channel(channel.target, channel.property, channel.component, channel.times[keep], channel.values[keep],
+                          np.asarray(channel.interpolation)[keep])  # fmt: skip
+        ticks = ticks[keep]
     kept = channel.extras.get("fbx", {})
     flags, data, refcount = kept.get("flags"), kept.get("data"), kept.get("refcount")
     keys = len(channel.times)
@@ -244,7 +252,7 @@ def _curve_object(doc, channel: Channel, scale: float, default: float) -> FBXObj
     curve = doc.add_object("AnimationCurve", "", cls="AnimCurve", children=[
         FBXNode("Default", [Prop("D", float(default))]),
         FBXNode("KeyVer", [Prop("I", 4009)]),
-        FBXNode("KeyTime", [Prop("l", _seconds_to_ticks(channel.times))]),
+        FBXNode("KeyTime", [Prop("l", ticks)]),
         FBXNode("KeyValueFloat", [Prop("f", (channel.values * scale).astype(np.float32))]),
         FBXNode("KeyAttrFlags", [Prop("i", np.asarray(flags, dtype=np.int32))]),
         FBXNode("KeyAttrDataFloat", [Prop("f", np.asarray(data, dtype=np.float32))]),

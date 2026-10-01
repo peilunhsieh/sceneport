@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import warnings
 
 import numpy as np
 
@@ -12,23 +13,52 @@ from .animation import write_animations
 from .blendshapes import write_blend_shapes
 from .binary import write
 from .binary.node import FBXNode, Prop
+from .compat import prepare
 from .document import ROOT_ID, FBXDocument, FBXObject, Properties70
 from .materials import MaterialWriter, material_layer
 from .settings import write_global_settings
 from .skin import write_bind_pose, write_skin
 
 
-def save(scene: Scene, path: str | os.PathLike, *, version: int = 7400) -> None:
-    write(document_from_scene(scene, version=version).to_file(), path)
+def save(
+    scene: Scene,
+    path: str | os.PathLike,
+    *,
+    version: int = 7400,
+    unmirror_joints: bool = True,
+    split_inbetweens: bool = True,
+) -> None:
+    """Write `scene` as binary FBX. See document_from_scene for the options."""
+    directory = os.path.dirname(os.path.abspath(path))
+    doc = document_from_scene(
+        scene, version=version, directory=directory, unmirror_joints=unmirror_joints, split_inbetweens=split_inbetweens
+    )
+    write(doc.to_file(), path)
 
 
-def document_from_scene(scene: Scene, *, version: int = 7400) -> FBXDocument:
+def document_from_scene(
+    scene: Scene,
+    *,
+    version: int = 7400,
+    directory: str | os.PathLike | None = None,
+    unmirror_joints: bool = True,
+    split_inbetweens: bool = True,
+) -> FBXDocument:
+    """`directory`: where the file will be written; texture paths are made relative to it.
+
+    `unmirror_joints` rewrites mirrored joints (negative scale) without mirroring and `split_inbetweens`
+    turns in-between shapes into plain ones, both without changing how the scene looks (see compat.py):
+    Blender's importer can't handle either. Set them to False to write the scene as it is (e.g. for Maya).
+    """
+    if any(clip.point_samples for clip in scene.animations):
+        warnings.warn("FBX can't hold per-vertex animation (point samples); it is not written (USD keeps it)")
+    scene = prepare(scene, unmirror_joints=unmirror_joints, split_inbetweens=split_inbetweens)
     doc = FBXDocument(version=version, global_settings=write_global_settings(scene))
     geometries: dict[int, FBXObject] = {}  # id(Mesh) -> Geometry, so shared meshes are written once
     first_users: dict[int, tuple[Mesh, FBXObject]] = {}  # id(Mesh) -> (mesh, first Model using it)
     models: dict[Node, FBXObject] = {}
     shape_channels: dict[tuple[int, str], FBXObject] = {}  # (id(Mesh), shape name) -> BlendShapeChannel
-    materials = MaterialWriter(doc)
+    materials = MaterialWriter(doc, directory)
     for material in scene.materials:  # unbound ones too, in scene order
         materials.material(material)
     # Meshes with material slots on any of their nodes get a LayerElementMaterial.

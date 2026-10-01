@@ -11,6 +11,10 @@ Keys hold an interpolation mode for the segment that starts at them: "constant",
 "linear" or "cubic" (Hermite with automatic, Catmull-Rom style tangents). Before
 the first and after the last key the value holds. Quaternion components are
 interpolated one by one and normalized, as Blender does.
+
+PointSamples animate a whole mesh's vertex positions (a point cache, e.g. USD
+time-sampled points): linear between samples, held outside them. They replace
+the mesh's rest positions before blend shapes and skinning.
 """
 
 from __future__ import annotations
@@ -97,9 +101,37 @@ def _auto_slopes(keys: NDArray, values: NDArray) -> NDArray:
     return slopes
 
 
+@dataclass(eq=False)
+class PointSamples:
+    """Vertex positions of `mesh` (in the mesh's own space) at `times` (seconds): (T, N, 3)."""
+
+    mesh: Mesh
+    times: NDArray[np.float64]
+    points: NDArray[np.float64]
+
+    def __post_init__(self):
+        self.times = np.asarray(self.times, dtype=np.float64).reshape(-1)
+        self.points = np.asarray(self.points, dtype=np.float64).reshape(len(self.times), -1, 3)
+
+    def validate(self) -> None:
+        if len(self.times) == 0 or np.any(np.diff(self.times) <= 0):
+            raise ValueError(f"point samples of {self.mesh.name!r}: times must be strictly increasing, at least one")
+        if self.points.shape[1] != self.mesh.n_vertices:
+            raise ValueError(f"point samples of {self.mesh.name!r}: {self.points.shape[1]} points, mesh has {self.mesh.n_vertices}")
+
+    def evaluate(self, times: ArrayLike) -> NDArray[np.float64]:
+        """(F, N, 3) positions at `times`: linear between samples, held before the first and after the last."""
+        t = np.atleast_1d(np.asarray(times, dtype=np.float64))
+        if len(self.times) == 1:
+            return np.repeat(self.points[:1], len(t), axis=0)
+        i = np.clip(np.searchsorted(self.times, t, side="right") - 1, 0, len(self.times) - 2)
+        u = np.clip((t - self.times[i]) / (self.times[i + 1] - self.times[i]), 0.0, 1.0)[:, None, None]
+        return self.points[i] * (1 - u) + self.points[i + 1] * u
+
+
 @dataclass
 class Animation:
-    """A clip: channels sharing a timeline. `start`/`end` (seconds) default to the key range."""
+    """A clip: channels (and point samples) sharing a timeline. `start`/`end` (seconds) default to the key range."""
 
     name: str
     channels: list[Channel] = field(default_factory=list)
@@ -107,9 +139,10 @@ class Animation:
     start: float | None = None
     end: float | None = None
     extras: dict[str, Any] = field(default_factory=dict)
+    point_samples: list[PointSamples] = field(default_factory=list)  # animated vertex positions, one per mesh
 
     def time_range(self) -> tuple[float, float]:
-        keys = [c.times for c in self.channels if len(c.times)]
+        keys = [c.times for c in self.channels if len(c.times)] + [p.times for p in self.point_samples if len(p.times)]
         first = min((k[0] for k in keys), default=0.0)
         last = max((k[-1] for k in keys), default=0.0)
         return (first if self.start is None else self.start, last if self.end is None else self.end)
@@ -123,6 +156,8 @@ class Animation:
     def validate(self) -> None:
         for channel in self.channels:
             channel.validate()
+        for samples in self.point_samples:
+            samples.validate()
 
     # -- evaluation ----------------------------------------------------------
 
@@ -175,9 +210,20 @@ class Animation:
                 weights[:, index[channel.property]] = channel.evaluate(times)
         return weights
 
+    def points(self, mesh: Mesh, times: ArrayLike) -> NDArray[np.float64] | None:
+        """(F, N, 3) animated rest positions of `mesh` at `times`, or None if the clip has no point samples for it."""
+        samples = next((p for p in self.point_samples if p.mesh is mesh), None)
+        return None if samples is None else samples.evaluate(times)
+
+    def vertices(self, mesh: Mesh, times: ArrayLike) -> NDArray[np.float64]:
+        """(F, N, 3) vertices of `mesh` at `times` in its own space: point samples, then blend shapes (no skinning)."""
+        return mesh.deformed_vertices(self.blend_weights(mesh, times), self.points(mesh, times))
+
     def skinned_vertices(self, scene: Scene, mesh: Mesh, times: ArrayLike) -> NDArray[np.float64]:
         """(F, N, 3) world-space vertices of a skinned `mesh` at `times`."""
-        return mesh.skinned_vertices(self.joint_world(scene, mesh.skin, times), self.blend_weights(mesh, times))
+        return mesh.skinned_vertices(
+            self.joint_world(scene, mesh.skin, times), self.blend_weights(mesh, times), self.points(mesh, times)
+        )
 
 
 def rest_value(node: Node, prop: str) -> NDArray[np.float64]:

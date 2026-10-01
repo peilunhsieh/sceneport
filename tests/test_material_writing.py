@@ -210,3 +210,27 @@ def test_usdz_packages_embedded_textures(tmp_path):
     assert any(name.endswith("diffuse.png") for name in zipfile.ZipFile(tmp_path / "out.usdz").namelist())
     texture = by_name(sceneport.load(tmp_path / "out.usdz"))["Skin"].pbr().base_color_texture
     assert texture.file.resolved is not None
+
+
+def test_fbx_texture_paths_relative_to_written_file(tmp_path):
+    from sceneport.scene import AssetPath
+    from sceneport.scene.pbr import TextureRef
+
+    (tmp_path / "assets" / "textures").mkdir(parents=True)
+    image = tmp_path / "assets" / "textures" / "albedo.png"
+    image.write_bytes(b"")
+    texture = TextureRef(AssetPath("../textures/albedo.png", str(image)))  # authored relative to some other layer
+    nodes, surface = preview_surface_nodes(PBRMaterial("m", base_color_texture=texture))
+    material = Material("m", nodes=nodes, outputs={"surface": surface})
+    mesh = Mesh("tri", [[0, 0, 0], [1, 0, 0], [0, 1, 0]], [3], [0, 1, 2])
+    (tmp_path / "out").mkdir()
+    sceneport.save(Scene(nodes=[Node("tri", mesh=mesh, materials=[material])]), tmp_path / "out" / "tri.fbx")
+
+    from sceneport.interop.fbx.binary import read
+
+    doc = FBXDocument.from_file(read(tmp_path / "out" / "tri.fbx"))
+    (written,) = doc.iter_objects("Texture")
+    assert written.child_value("RelativeFilename") == "../assets/textures/albedo.png"  # as Blender writes it
+    assert written.child_value("FileName") == str(image)
+    back = sceneport.load(tmp_path / "out" / "tri.fbx").materials[0].pbr().base_color_texture
+    assert back.file.resolved == str(image)

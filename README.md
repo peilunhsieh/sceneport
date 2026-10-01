@@ -59,6 +59,7 @@ clip = scene.animations[0]               # e.g. one per FBX animation stack
 times = clip.frame_times()               # one per frame at clip.fps
 clip.skinned_vertices(scene, mesh, times)  # (F, N, 3)
 clip.world_matrices(scene, times)        # {node: (F, 4, 4)}
+clip.vertices(mesh, times)               # (F, N, 3) in mesh space, incl. per-vertex animation (point_samples)
 
 # Materials (USD and FBX): generic shading node graphs
 node.materials                           # the node's material slots
@@ -129,7 +130,12 @@ sceneport convert scan.ply scan.usd
 ```
 
 Meshes, blend shapes, skins, animation and materials carry over between FBX
-and USD (materials as Phong in FBX; see the conventions below).
+and USD (materials as Phong in FBX; see the conventions below). Per-vertex
+animation (time-sampled points) is kept by USD only. For Blender, FBX export
+splits in-between shapes into plain ones and rewrites mirrored joints (negative
+scale) without mirroring, since its importer can't handle either; both keep the
+same deformation (`split_inbetweens=False` / `unmirror_joints=False` to write
+them as they are, e.g. for Maya).
 For PLY, `sceneport.save(scene, "x.ply", uvs="vertex")` writes per-vertex UVs
 that Blender reads (splitting vertices at UV seams); the default per-corner UVs
 are lossless but only MeshLab-style readers see them; `uvs=None` leaves UVs out.

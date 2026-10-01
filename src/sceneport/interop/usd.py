@@ -65,7 +65,7 @@ from ..math import (
     quaternion_from_matrix,
     quaternion_matrix,
 )
-from ..scene.animation import Animation, Channel, rest_value
+from ..scene.animation import Animation, Channel, PointSamples, rest_value
 from ..scene.material import AssetPath, Connection, Material, NodeGraph, Port, ShaderNode
 from ..scene.pbr import NATIVE_SURFACES, native_surface, preview_surface_nodes
 from .export import texture_path
@@ -239,6 +239,11 @@ class _Writer:
         self.fps = self.active.fps if self.active else 24.0
         self.active_times = self.active.frame_times() if self.active else np.zeros(0)
         self.active_values = self.active.node_values(self.active_times) if self.active else {}
+        # Points are time-sampled on the Mesh prim, so like node animation only the timeline's clip can have them.
+        self.active_points = {id(p.mesh): p for p in self.active.point_samples} if self.active else {}
+        for clip in scene.animations[1:]:
+            if clip.point_samples:
+                warnings.warn(f"clip {clip.name!r}: USD holds per-vertex animation for the first clip only; not written")
         self._plan()
 
     # planning
@@ -437,6 +442,10 @@ class _Writer:
         else:
             usd_mesh = _write_mesh(self.stage, path, mesh)
             self.written[id(mesh)] = path
+            if id(mesh) in self.active_points:  # the rest points stay the default value
+                samples, attr = self.active_points[id(mesh)], usd_mesh.GetPointsAttr()
+                for t, points in zip(samples.times, samples.points):
+                    attr.Set(Vt.Vec3fArray.FromNumpy(np.ascontiguousarray(points, dtype=np.float32)), _time_code(t, self.fps))
         _set_display_name(usd_mesh.GetPrim(), mesh.name)
         return usd_mesh
 
@@ -521,7 +530,10 @@ class _Writer:
             )  # (F, J, 4, 4)
             translations = local[..., :3, 3]
             scales = np.linalg.norm(local[..., :3, :3], axis=-2)
-            rotations = quaternion_from_matrix(local[..., :3, :3] / scales[..., None, :])
+            # A mirrored joint (negative determinant) needs a negative scale, or the rotation isn't one:
+            # negating all three keeps it proper and matches the usual (-1, -1, -1) of mirrored rigs.
+            scales *= np.where(np.linalg.det(local[..., :3, :3]) < 0, -1.0, 1.0)[..., None]
+            rotations = quaternion_from_matrix(local[..., :3, :3] / np.where(scales == 0, 1, scales)[..., None, :])
             for f in range(1, len(times)):  # keep each joint's quaternion signs continuous over time
                 rotations[f] *= np.where(np.sum(rotations[f] * rotations[f - 1], axis=-1, keepdims=True) < 0, -1, 1)
             animation.CreateJointsAttr(Vt.TokenArray([plan.tokens[j] for j in plan.joints]))
@@ -843,6 +855,7 @@ class _Reader:
         self.skeleton_animations: dict[Sdf.Path, tuple[list[Usd.Prim], Sdf.Path | None]] = {}
         self.bound_shapes: dict[Sdf.Path, list[tuple[Mesh, dict[str, str]]]] = {}
         self.node_channels: list[Channel] = []  # time-sampled xformOps: the timeline's clip
+        self.point_samples: list[PointSamples] = []  # time-sampled mesh points: the timeline's clip too
         self.fps = 24.0
         self.materials: dict[Sdf.Path, Material] = {}
 
@@ -921,11 +934,11 @@ class _Reader:
                 bind_by_token[token] = bind[i]
         self.skeletons[prim.GetPath()] = (by_token, bind_by_token)
         animations = [c for c in prim.GetChildren() if c.IsA(UsdSkel.Animation)]
-        source = UsdSkel.BindingAPI(prim).GetAnimationSourceRel().GetTargets()
-        source_path = source[0] if source else None
-        if source_path is not None and all(a.GetPath() != source_path for a in animations):
-            if (bound := prim.GetStage().GetPrimAtPath(source_path)) and bound.IsA(UsdSkel.Animation):
-                animations.append(bound)
+        # The bound source may be authored on the Skeleton or inherited from an ancestor (e.g. the SkelRoot).
+        bound = UsdSkel.BindingAPI(prim).GetInheritedAnimationSource()
+        source_path = bound.GetPath() if bound else None
+        if bound and bound.IsA(UsdSkel.Animation) and all(a.GetPath() != source_path for a in animations):
+            animations.append(bound)
         self.skeleton_animations[prim.GetPath()] = (animations, source_path)
 
         for child in prim.GetFilteredChildren(_PREDICATE):
@@ -943,6 +956,8 @@ class _Reader:
                 if not ref.assetPath and ref.primPath in self.meshes:
                     return self.meshes[ref.primPath]
         mesh = self.meshes[prim.GetPath()] = _read_mesh(prim)
+        if (samples := _read_point_samples(prim, mesh, self.fps)) is not None:
+            self.point_samples.append(samples)
         binding = UsdSkel.BindingAPI(prim)
         if binding.GetJointIndicesAttr().HasAuthoredValue():
             self.pending_skins.append((mesh, prim))
@@ -1025,9 +1040,11 @@ class _Reader:
                 clips.setdefault(name, Animation(name, fps=self.fps)).channels += channels
                 if prim.GetPath() == source_path and active_name is None:
                     active_name = name
-        if self.node_channels:
+        if self.node_channels or self.point_samples:
             name = active_name or "animation"
-            clips.setdefault(name, Animation(name, fps=self.fps)).channels += self.node_channels
+            clip = clips.setdefault(name, Animation(name, fps=self.fps))
+            clip.channels += self.node_channels
+            clip.point_samples += self.point_samples
         if active_name in clips and stage.HasAuthoredTimeCodeRange():
             clips[active_name].start = stage.GetStartTimeCode() / self.fps
             clips[active_name].end = stage.GetEndTimeCode() / self.fps
@@ -1294,6 +1311,19 @@ def _read_mesh(prim: Usd.Prim) -> Mesh:
     if usd_mesh.GetOrientationAttr().Get(_TIME) == UsdGeom.Tokens.leftHanded:
         _flip_winding(mesh)
     return mesh
+
+
+def _read_point_samples(prim: Usd.Prim, mesh: Mesh, fps: float) -> PointSamples | None:
+    """Time-sampled points of a Mesh prim (vertex animation), if it has more than one sample of the same size."""
+    attr = UsdGeom.Mesh(prim).GetPointsAttr()
+    codes = attr.GetTimeSamples()
+    if len(codes) < 2:
+        return None
+    points = [np.array(attr.Get(code), dtype=np.float64).reshape(-1, 3) for code in codes]
+    if any(len(p) != mesh.n_vertices for p in points):
+        warnings.warn(f"{prim.GetPath()}: point samples change the vertex count; vertex animation skipped")
+        return None
+    return PointSamples(mesh, np.array(codes) / fps, np.stack(points))
 
 
 def _read_blend_shapes(prim: Usd.Prim, n_vertices: int) -> list[BlendShape]:

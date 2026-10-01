@@ -120,6 +120,11 @@ future changes can keep them consistent (or revisit them deliberately).
   and **in-betweens**. Weights interpolate piecewise-linearly through the
   in-betweens and extrapolate beyond [0, 1], matching FBX and UsdSkel.
   In-betweens exist because FBX (Maya) and USD support them; Blender and glTF do not.
+- **FBX export splits in-betweens by default** (`split_inbetweens=False` keeps
+  them): Blender's FBX importer stops with an error on them. Weights
+  interpolate linearly through the in-betweens, so a shape equals a sum of
+  plain shapes ("<name>_<weight>" plus the full one) with "hat" function
+  weights; weight curves are rewritten per frame. Exact at every frame.
 - `Mesh.deformed_vertices(weights)` takes a dict, an `(S,)` array or an
   `(F, S)` array of frames (strict 1-D/2-D, shape axis last). Evaluation loops
   over shapes on their own vertices, so sparse shapes stay cheap and
@@ -231,6 +236,20 @@ future changes can keep them consistent (or revisit them deliberately).
   the MTL surface is kept on `outputs:mtl:surface` next to a generated
   UsdPreviewSurface, as for FBX.
 
+## FBX export for Blender
+
+- `sceneport.save(scene, "x.fbx")` rewrites two things Blender's FBX importer
+  can't handle, without changing what the scene looks like (interop/fbx/compat.py,
+  on a shallow copy; the scene itself is never modified):
+  - in-between shapes are split (see Blend shapes);
+  - mirrored joints (negative scale, e.g. a rig's right side) are unmirrored:
+    each one's frame is turned by -I, so local' = F_parent @ local @ F_self and
+    inverse bind' = F @ inverse bind. Skinning and joint positions are
+    unchanged; animated joints in mirrored chains are baked per frame.
+    `unmirror_joints=False` keeps the negative scales (Maya reads them).
+- Key times are merged on whole FBX ticks: two float times for the same frame
+  must not become two keys on one tick, which Blender's importer misreads.
+
 ## Animation
 
 - **Keyframes, not baked samples.** `Scene.animations` holds clips
@@ -270,3 +289,9 @@ future changes can keep them consistent (or revisit them deliberately).
 - **Time codes** are doubles: seconds × fps, snapped to whole frames when only
   floating-point noise is off, so FBX keys on frames land on integer codes.
 - On load, USD joint keys that never leave the rest value are not turned into channels.
+- **Per-vertex animation** (point caches): a clip's `point_samples` hold
+  time-sampled vertex positions per mesh (`PointSamples`, mesh space; linear
+  between samples, held outside), which replace the rest positions before blend
+  shapes and skinning (`Animation.vertices` / `skinned_vertices`). USD reads and
+  writes them as time-sampled `points` on the Mesh prim (timeline clip only,
+  rest points kept as the default). FBX, OBJ and PLY can't hold them and warn.

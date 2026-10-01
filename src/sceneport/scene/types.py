@@ -132,7 +132,9 @@ class Mesh:
         if self.material_indices is not None:
             self.material_indices = np.asarray(self.material_indices, dtype=np.int32)
 
-    def deformed_vertices(self, weights: dict[str, float] | NDArray | None = None) -> NDArray[np.float64]:
+    def deformed_vertices(
+        self, weights: dict[str, float] | NDArray | None = None, vertices: NDArray | None = None
+    ) -> NDArray[np.float64]:
         """Vertices with blend shapes applied.
 
         `weights` is one of:
@@ -141,16 +143,27 @@ class Mesh:
           - an (S,) array, one weight per shape in `blend_shapes` order -> (N, 3)
           - an (F, S) array, one row per frame -> (F, N, 3)
         Weights are not clamped; in-betweens are interpolated through.
+        `vertices` replaces the rest positions: (N, 3), or (F, N, 3) per frame (e.g.
+        animated points, see PointSamples), which gives (F, N, 3).
         """
         w = self._weight_array(weights)
         frames = np.atleast_2d(w)
-        out = np.repeat(self.vertices[None], len(frames), axis=0)
+        base = self.vertices if vertices is None else np.asarray(vertices, dtype=np.float64)
+        if base.shape[-2:] != self.vertices.shape or base.ndim not in (2, 3):
+            raise ValueError(f"vertices must be (N, 3) or (F, N, 3) with N = {self.n_vertices}, got {base.shape}")
+        if base.ndim == 3:
+            if len(frames) not in (1, len(base)):
+                raise ValueError(f"frame counts differ: {len(base)} vertex frames, {len(frames)} weight rows")
+            frames = np.broadcast_to(frames, (len(base), frames.shape[1]))
+            out = base.copy()
+        else:
+            out = np.repeat(base[None], len(frames), axis=0)
         for s, shape in enumerate(self.blend_shapes):
             column = frames[:, s]
             if column.any():
                 target = slice(None) if shape.indices is None else shape.indices
                 out[:, target] += shape.offsets_at(column)
-        return out[0] if w.ndim == 1 else out
+        return out[0] if w.ndim == 1 and base.ndim == 2 else out
 
     def _weight_array(self, weights: dict[str, float] | NDArray | None) -> NDArray[np.float64]:
         defaults = np.array([shape.weight for shape in self.blend_shapes], dtype=np.float64)
@@ -172,13 +185,14 @@ class Mesh:
         return w
 
     def skinned_vertices(
-        self, joint_world: NDArray, weights: dict[str, float] | NDArray | None = None
+        self, joint_world: NDArray, weights: dict[str, float] | NDArray | None = None, vertices: NDArray | None = None
     ) -> NDArray[np.float64]:
         """World-space vertices: blend shapes (see `deformed_vertices`), then linear blend skinning.
 
         `joint_world` holds the world matrices of `skin.joints`, (J, 4, 4) for one pose
         or (F, J, 4, 4) for F frames; `Skin.joint_world(scene)` gives the current pose.
-        Blend shape `weights` may also have a frame axis. Returns (N, 3) or (F, N, 3).
+        Blend shape `weights` and replacement rest `vertices` may also have a frame axis.
+        Returns (N, 3) or (F, N, 3).
         """
         if self.skin is None:
             raise ValueError(f"mesh {self.name!r} has no skin")
@@ -186,7 +200,7 @@ class Mesh:
         joint_world = np.asarray(joint_world, dtype=np.float64)
         if joint_world.shape[-3:] != (len(skin.joints), 4, 4) or joint_world.ndim not in (3, 4):
             raise ValueError(f"joint_world must be (J, 4, 4) or (F, J, 4, 4) with J = {len(skin.joints)}, got {joint_world.shape}")
-        base = self.deformed_vertices(weights)
+        base = self.deformed_vertices(weights, vertices)
         single = joint_world.ndim == 3 and base.ndim == 2
 
         matrices = joint_world if joint_world.ndim == 4 else joint_world[None]

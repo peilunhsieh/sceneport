@@ -11,8 +11,9 @@ from sceneport.scene import BlendShape, Inbetween, Node, Scene
 from helpers import assert_blend_shapes_close, mixed_mesh, shaped_mesh
 
 
+# These tests check FBX's own in-between layout, so they write real in-betweens (FBX export splits them by default).
 def fbx_roundtrip(scene: Scene) -> Scene:
-    return scene_from_document(FBXDocument.from_file(loads(dumps(document_from_scene(scene).to_file()))))
+    return scene_from_document(FBXDocument.from_file(loads(dumps(document_from_scene(scene, split_inbetweens=False).to_file()))))
 
 
 # -- model --------------------------------------------------------------------
@@ -111,14 +112,14 @@ def test_validate(shape, message):
 
 def test_fbx_roundtrip(tmp_path):
     mesh = shaped_mesh()
-    sceneport.save(Scene(nodes=[Node("Face", mesh=mesh)]), tmp_path / "face.fbx")
+    sceneport.save(Scene(nodes=[Node("Face", mesh=mesh)]), tmp_path / "face.fbx", split_inbetweens=False)
     back = sceneport.load(tmp_path / "face.fbx").meshes[0]
     assert_blend_shapes_close(mesh.blend_shapes, back.blend_shapes)
     np.testing.assert_allclose(back.deformed_vertices(), mesh.deformed_vertices())
 
 
 def test_fbx_layout():
-    doc = document_from_scene(Scene(nodes=[Node("Face", mesh=shaped_mesh())]))
+    doc = document_from_scene(Scene(nodes=[Node("Face", mesh=shaped_mesh())]), split_inbetweens=False)
     (geometry,) = doc.iter_objects("Geometry", "Mesh")
     (deformer,) = doc.children_of(geometry, "Deformer")
     assert (deformer.subtype, deformer.cls) == ("BlendShape", "Deformer")
@@ -139,7 +140,7 @@ def test_fbx_layout():
 def test_fbx_shared_mesh_writes_shapes_once():
     mesh = shaped_mesh()
     scene = Scene(nodes=[Node("A", mesh=mesh), Node("B", mesh=mesh)])
-    doc = document_from_scene(scene)
+    doc = document_from_scene(scene, split_inbetweens=False)
     assert len(list(doc.iter_objects("Deformer", "BlendShape"))) == 1
     back = fbx_roundtrip(scene)
     assert back.nodes[0].mesh is back.nodes[1].mesh
@@ -180,7 +181,7 @@ def test_fbx_inbetween_with_other_vertices():
 
 def test_fbx_duplicate_connections_read_once():
     """FBX SDK files can repeat a connection; shapes must not be read twice."""
-    doc = document_from_scene(Scene(nodes=[Node("Face", mesh=shaped_mesh())]))
+    doc = document_from_scene(Scene(nodes=[Node("Face", mesh=shaped_mesh())]), split_inbetweens=False)
     doc.connections += [c for c in doc.connections if c.src in {o.id for o in doc.iter_objects("Deformer")}]
     assert len(fbx_roundtrip_doc(doc).meshes[0].blend_shapes) == 2
 
@@ -188,7 +189,7 @@ def test_fbx_duplicate_connections_read_once():
 def test_fbx_shape_names_follow_blender():
     """Single-target channels take the Shape geometry's name (MHR: channel shape_c_0, Shape shape_0);
     channels with in-betweens keep the channel name."""
-    doc = document_from_scene(Scene(nodes=[Node("Face", mesh=shaped_mesh())]))
+    doc = document_from_scene(Scene(nodes=[Node("Face", mesh=shaped_mesh())]), split_inbetweens=False)
     for i, channel in enumerate(doc.iter_objects("Deformer", "BlendShapeChannel")):
         channel.name = f"shape_c_{i}"
         for target in doc.children_of(channel, "Geometry"):
@@ -238,7 +239,7 @@ def test_usd_shared_mesh():
 
 def test_fbx_to_usd_to_fbx(tmp_path):
     mesh = shaped_mesh()
-    sceneport.save(Scene(nodes=[Node("Face", mesh=mesh)]), tmp_path / "a.fbx")
+    sceneport.save(Scene(nodes=[Node("Face", mesh=mesh)]), tmp_path / "a.fbx", split_inbetweens=False)
     sceneport.save(sceneport.load(tmp_path / "a.fbx"), tmp_path / "b.usda")
-    sceneport.save(sceneport.load(tmp_path / "b.usda"), tmp_path / "c.fbx")
+    sceneport.save(sceneport.load(tmp_path / "b.usda"), tmp_path / "c.fbx", split_inbetweens=False)
     assert_blend_shapes_close(mesh.blend_shapes, sceneport.load(tmp_path / "c.fbx").meshes[0].blend_shapes, rtol=1e-6)

@@ -194,6 +194,26 @@ def test_fbx_orientation_becomes_euler():
     np.testing.assert_allclose(back, source, atol=1e-6)  # float32 Euler keys
 
 
+def test_fbx_key_times_strictly_increase():
+    """Frame times computed two ways (e.g. 103 / 24) must not become two keys on one tick; Blender misreads those."""
+    from sceneport.interop.fbx import document_from_scene
+    from sceneport.math import quaternion_from_matrix
+
+    scene = rig_scene()
+    mid = scene.find("mid")
+    codes = np.arange(101, 130)
+    times = codes * (1 / 24)  # differs from codes / 24 in the last bit for some frames
+    q = quaternion_continuity(quaternion_from_matrix(euler_matrix(np.stack([np.zeros_like(times), np.zeros_like(times), codes - 101.0], axis=1))))
+    channels = [Channel(mid, "orientation", c, times, q[:, c]) for c in range(4)]
+    channels.append(Channel(scene.find("root"), "translation", 0, [times[0], times[0] + 1e-13, times[-1]], [0.0, 0.0, 1.0]))
+    scene.animations = [Animation("walk", channels, fps=24)]
+    doc = document_from_scene(scene)
+    for curve in doc.iter_objects("AnimationCurve"):
+        ticks = curve.child_value("KeyTime")
+        assert (np.diff(ticks) > 0).all()
+    assert {len(c.child_value("KeyTime")) for c in doc.iter_objects("AnimationCurve")} == {29, 2}
+
+
 def test_fbx_several_clips_and_custom_rate():
     scene = rig_scene()
     mid = scene.find("mid")
@@ -258,6 +278,47 @@ def test_usd_skel_animation_matches_usdskel():
         np.testing.assert_allclose(baked, ours[f], atol=1e-5, err_msg=f"frame {f}")
 
 
+@pytest.mark.parametrize("scale", [(-1, -1, -1), (-1, 1, 1)])
+def test_usd_mirrored_joint_roundtrip(scale):
+    """A joint with a negative scale (a mirrored rig, e.g. the right leg) keeps its reflection in a SkelAnimation."""
+    scene = rig_scene()
+    scene.find("mid").transform.scale = np.array(scale, dtype=float)
+    scene.animations = [mixed_clip(scene)]
+    back = usd_roundtrip(scene)
+    times = scene.animations[0].frame_times()
+    np.testing.assert_allclose(
+        back.animations[0].skinned_vertices(back, back.meshes[0], times),
+        scene.animations[0].skinned_vertices(scene, scene.meshes[0], times),
+        atol=1e-5,
+    )
+
+
+def test_usd_animation_source_inherited_from_skel_root():
+    """A SkelAnimation outside the Skeleton, bound on the SkelRoot (like Pixar's UsdSkel examples)."""
+    from pxr import Sdf, UsdSkel
+
+    from sceneport.interop.usd import scene_from_stage, stage_from_scene
+
+    scene = rig_scene()
+    clip = mixed_clip(scene)
+    scene.animations = [clip]
+    stage = stage_from_scene(scene)
+    layer = stage.GetRootLayer()
+    assert Sdf.CopySpec(layer, "/SkelRoot/root/take", layer, "/SkelRoot/walk")
+    stage.RemovePrim("/SkelRoot/root/take")
+    UsdSkel.BindingAPI(stage.GetPrimAtPath("/SkelRoot/root")).GetAnimationSourceRel().ClearTargets(True)
+    UsdSkel.BindingAPI.Apply(stage.GetPrimAtPath("/SkelRoot")).CreateAnimationSourceRel().SetTargets(["/SkelRoot/walk"])
+    layer.customLayerData = {}  # no recorded clip name: the bound animation is the timeline's clip
+
+    back = scene_from_stage(stage)
+    (read,) = back.animations
+    assert read.name == "walk"
+    times = clip.frame_times()
+    np.testing.assert_allclose(
+        read.skinned_vertices(back, back.meshes[0], times), clip.skinned_vertices(scene, scene.meshes[0], times), atol=1e-5
+    )
+
+
 def test_usd_node_animation_and_several_clips():
     scene = rig_scene()
     strip, helper, mid = scene.find("strip"), scene.find("helper"), scene.find("mid")
@@ -296,3 +357,42 @@ def test_usd_unskinned_blend_shape_animation():
     assert (channel.target is back.meshes[0], channel.property) == (True, "Wide")
     np.testing.assert_allclose(channel.values, [0, 0.5, 1, 0.5, 0], atol=1e-6)  # baked at 2 fps
     assert back.meshes[0].blend_shapes[1].weight == 1.0  # default kept
+
+
+# -- point samples (per-vertex animation) ------------------------------------------------
+
+
+def wobble_scene():
+    """A blend-shaped triangle whose points are also animated (2 samples) on a moving node."""
+    from sceneport.scene import BlendShape, Mesh, Node, PointSamples
+
+    mesh = Mesh("tri", [[0, 0, 0], [1, 0, 0], [0, 1, 0]], [3], [0, 1, 2])
+    mesh.blend_shapes = [BlendShape("Up", [[0, 0, 1]], indices=[2], weight=0.5)]
+    node = Node("tri", mesh=mesh)
+    points = np.array([mesh.vertices, mesh.vertices + [0, 0, 2]])
+    clip = Animation("wobble", [Channel(node, "translation", 0, [0.0, 1.0], [0.0, 3.0])], fps=4,
+                     point_samples=[PointSamples(mesh, [0.0, 1.0], points)])  # fmt: skip
+    return Scene(nodes=[node], animations=[clip]), mesh, clip
+
+
+def test_point_samples_evaluate():
+    _, mesh, clip = wobble_scene()
+    verts = clip.vertices(mesh, [-1.0, 0.5, 2.0])  # held before / linear inside / held after
+    np.testing.assert_allclose(verts[:, 2], [[0, 1, 0.5], [0, 1, 1.5], [0, 1, 2.5]])  # + blend shape at 0.5
+    np.testing.assert_allclose(verts[1, 0], [0, 0, 1])
+    assert clip.time_range() == (0.0, 1.0)
+
+
+def test_point_samples_usd_roundtrip(tmp_path):
+    import sceneport
+
+    scene, mesh, clip = wobble_scene()
+    sceneport.save(scene, tmp_path / "w.usda")
+    back = sceneport.load(tmp_path / "w.usda")
+    (back_clip,) = back.animations
+    (samples,) = back_clip.point_samples
+    np.testing.assert_allclose(back.meshes[0].vertices, mesh.vertices)  # the rest points stay the default
+    times = clip.frame_times()
+    np.testing.assert_allclose(back_clip.vertices(back.meshes[0], times), clip.vertices(mesh, times), atol=1e-6)
+    with pytest.warns(UserWarning, match="per-vertex animation"):
+        sceneport.save(scene, tmp_path / "w.fbx")
