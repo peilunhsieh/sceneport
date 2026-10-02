@@ -187,3 +187,14 @@ def test_several_top_level_nodes_share_a_default_root():
     assert [n.name for n in back.nodes] == ["A", "B", "C"]  # the generated root is dropped on load
     single = stage_from_scene(Scene(nodes=[Node("Only", mesh=mixed_mesh())]))
     assert single.GetDefaultPrim().GetPath() == "/Only"  # one top-level node is the default prim itself
+
+
+def test_blender_generated_root_is_dropped():
+    """Blender's USD exporter wraps everything in a /root tagged Blender:generated; it isn't a scene node."""
+    stage = Usd.Stage.CreateInMemory()
+    root = UsdGeom.Xform.Define(stage, "/root").GetPrim()
+    root.SetCustomDataByKey("Blender:generated", True)
+    UsdGeom.Xform.Define(stage, "/root/A")
+    UsdGeom.Xform.Define(stage, "/root/B")
+    stage.SetDefaultPrim(root)
+    assert [n.name for n in scene_from_stage(stage).nodes] == ["A", "B"]

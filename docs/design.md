@@ -275,7 +275,8 @@ future changes can keep them consistent (or revisit them deliberately).
   generated `root` Xform (as Blender's exporter does), tagged in customData
   and dropped again on load; a single top-level node is the default prim itself.
   The wrapper also carries Blender's own tag (`Blender:generated`), so Blender's
-  importer skips it like the `/root` of its own exports instead of adding an empty.
+  importer skips it like the `/root` of its own exports instead of adding an empty;
+  likewise sceneport drops a `/root` with Blender's tag when reading a Blender export.
 - Materials go in a `_materials` Scope under the default prim.
 - `metersPerUnit` is read even when an old writer stored it as a float
   (Blender 2.80), which USD's typed getter rejects.
@@ -290,11 +291,34 @@ future changes can keep them consistent (or revisit them deliberately).
   (mm per unit = 100 x metersPerUnit, as Blender converts).
 - FBX: a camera Model with a "Camera" NodeAttribute (film sizes in inches).
   FBX cameras look down +X, so camera nodes are turned 90 degrees about Y on
-  write and back on read (`compat.reframe`, which also keeps their children in
+  write and back on read (`interop/reframe.py`, which also keeps their children in
   place), as Blender's exporter does.
 - Viewers that frame a scene with its camera (Apple's Quick Look) need it: a
   scene's bounds can be useless (e.g. a node squashed to zero scale makes
   USD's bounds ~1e38).
+
+## Lights
+
+- `Node.light` (scene/light.py): a light on a node, placed and oriented by the
+  node, like cameras. For now one type, "dome": an environment light lit by an
+  image all around the scene (an HDRI). Brightness follows USD: intensity x
+  2^exposure, times color.
+- **The environment is a node with a scene-level shortcut**, not a scene
+  setting: as a node it reuses transforms (rotating the node turns the sky),
+  animation, naming and reframing, and USD round trips stay exact (several
+  domes, their place in the hierarchy). `Scene.environment` returns the first
+  dome node and `Scene.add_environment(texture, rotation=...)` creates one, for
+  the common one-sky case (Blender's World).
+- The image's pole (the "up" of a lat-long image) lies along the node's +Y,
+  USD's classic DomeLight convention. USD: written as a classic `DomeLight` on
+  the node's prim (what Blender writes, with a (90, 0, 90) rotation for its
+  Z-up World); `DomeLight` and `DomeLight_1` are read, and a `DomeLight_1`
+  whose `poleAxis` puts the pole on Z gets its node turned to +Y
+  (interop/reframe.py). The texture path follows the material texture rules.
+  Texture format defaults to USD's "automatic" (deduced from the file).
+- FBX has no environment light (only a flat ambient colour): the node is written
+  as an empty, with a warning; OBJ and PLY warn too. Other light types (point,
+  sun, spot, area) and FBX lights are not supported yet.
 
 ## Animation
 

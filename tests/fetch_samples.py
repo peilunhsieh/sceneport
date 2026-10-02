@@ -49,6 +49,12 @@ SAMPLES = {
         note="Pixar's UsdSkel example (38 MB zip): HumanFemale with skeleton, blend shapes at three "
         "levels of detail (payloads), walk and keepAlive animations, 2k textures",
     ),
+    "blender_institute_hdri": Sample(
+        url="https://dl.polyhaven.org/file/ph-assets/HDRIs/exr/1k/blender_institute_1k.exr",
+        file="blender_institute_1k.exr",
+        license="CC0 (Poly Haven, polyhaven.com/license): any use, no attribution required",
+        note="Poly Haven's 'Blender Institute' HDRI, 1k lat-long OpenEXR: an environment (dome light) texture",
+    ),
 }
 
 

@@ -14,7 +14,8 @@ from .blendshapes import read_blend_shapes
 from .binary import read
 from .document import FBXDocument, FBXObject
 from .camera import read_camera
-from .compat import CAMERA_TO_FBX, reframe
+from ..reframe import reframe
+from .compat import CAMERA_TO_FBX
 from .materials import read_material_indices, read_material_slots, read_materials
 from .settings import read_global_settings
 from .skin import JOINT_SUBTYPES, read_skin

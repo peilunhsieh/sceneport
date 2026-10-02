@@ -4,7 +4,7 @@ Lens properties as Blender's FBX exporter writes and its importer reads them:
 FocalLength (mm), FilmWidth / FilmHeight / FilmOffsetX / FilmOffsetY (inches),
 NearPlane / FarPlane / FocusDistance (scene units), CameraProjectionType (0
 perspective, 1 orthographic). FBX cameras look down their node's +X axis; the
--Z <-> +X turn is done on the nodes (compat.reframe), not here.
+-Z <-> +X turn is done on the nodes (interop/reframe.py), not here.
 """
 
 from __future__ import annotations

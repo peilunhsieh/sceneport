@@ -13,7 +13,8 @@ from ..math import euler_matrix, quaternion_matrix, scale_matrix, translation_ma
 if TYPE_CHECKING:
     from .animation import Animation
     from .camera import Camera
-    from .material import Material
+    from .light import Light
+    from .material import AssetPath, Material
 
 # USD primvar interpolation names; see interop/fbx/layers.py for the FBX mapping modes.
 Interpolation = Literal["vertex", "faceVarying", "uniform", "constant"]
@@ -421,6 +422,7 @@ class Node:
     # Material slots of the node's mesh (FBX and Blender keep them per object); see Mesh.material_indices.
     materials: list[Material | None] = field(default_factory=list)
     camera: Camera | None = None  # looks down the node's -Z axis; see scene/camera.py
+    light: Light | None = None  # e.g. a dome (environment) light; see scene/light.py
     # Format-specific data kept for round trips, keyed by format, e.g. extras["fbx"].
     extras: dict[str, Any] = field(default_factory=dict)
 
@@ -528,6 +530,26 @@ class Scene:
             stack.extend((c, node) for c in node.children)
         return out
 
+    @property
+    def environment(self) -> Node | None:
+        """The node holding the scene's environment (dome) light, or None; the first one if there are several."""
+        return next((node for node, _ in self.walk() if node.light is not None and node.light.type == "dome"), None)
+
+    def add_environment(
+        self, texture: str | AssetPath, *, rotation=(0.0, 0.0, 0.0), intensity: float = 1.0, exposure: float = 0.0
+    ) -> Node:
+        """Add a top-level "Environment" node with a dome light showing `texture` (e.g. an HDRI); returns it.
+
+        The image's pole lies along the node's +Y axis, so a Z-up scene typically turns it by `rotation`
+        (Euler degrees, XYZ); see scene/light.py.
+        """
+        from .light import Light
+        from .material import AssetPath
+
+        asset = texture if isinstance(texture, AssetPath) else AssetPath(str(texture), _existing(texture))
+        light = Light("dome", intensity=intensity, exposure=exposure, texture=asset)
+        return self.add(Node("Environment", Transform(rotation=rotation), light=light))
+
     def find(self, name: str) -> Node | None:
         return next((n for n, _ in self.walk() if n.name == name), None)
 
@@ -539,3 +561,10 @@ class Scene:
             if node.mesh is not None:
                 seen.setdefault(id(node.mesh), node.mesh)
         return list(seen.values())
+
+
+def _existing(path) -> str | None:
+    """`path` made absolute if it names an existing file, else None (the AssetPath stays unresolved)."""
+    import os
+
+    return os.path.abspath(path) if os.path.isfile(path) else None

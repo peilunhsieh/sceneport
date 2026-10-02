@@ -28,6 +28,11 @@ usd-core. Xformable prims become Nodes; other prims (Scope, Material, ...) are
 flattened away. Transform stacks that match the one written here are read
 exactly; others (and joint rest matrices) are decomposed from matrices.
 
+Lights: a node's dome (environment) light is the node's own prim, a classic
+DomeLight (image pole along +Y, as in sceneport). DomeLight and DomeLight_1 are
+read; a DomeLight_1 whose pole is Z gets its node turned so the pole is +Y.
+Other UsdLux lights are read as plain nodes for now.
+
 Materials: every UsdShade Material <-> a generic Material graph (shaders, node
 graphs, port values and connections, whatever the node library). Materials are
 written under a "_materials" Scope in the first root prim; names that aren't
@@ -55,7 +60,7 @@ from pathlib import Path
 
 import numpy as np
 from numpy.typing import NDArray
-from pxr import Gf, Sdf, Tf, Usd, UsdGeom, UsdShade, UsdSkel, UsdUtils, Vt
+from pxr import Gf, Sdf, Tf, Usd, UsdGeom, UsdLux, UsdShade, UsdSkel, UsdUtils, Vt
 
 from ..math import (
     ROTATION_ORDERS,
@@ -68,9 +73,11 @@ from ..math import (
 )
 from ..scene.animation import Animation, Channel, PointSamples, rest_value
 from ..scene.camera import Camera
+from ..scene.light import Light
 from ..scene.material import AssetPath, Connection, Material, NodeGraph, Port, ShaderNode
 from ..scene.pbr import NATIVE_SURFACES, native_surface, preview_surface_nodes
 from .export import texture_path
+from .reframe import reframe
 from .fbx.materials import inferred_fbx_type
 from ..scene.types import BlendShape, Inbetween, Mesh, Node, Primvar, Scene, Skin, Transform
 
@@ -78,6 +85,7 @@ EXTENSIONS = (".usd", ".usda", ".usdc", ".usdz")
 NAME_KEY = "sceneport:name"  # customData: a primvar's original name
 JOINT_KEY = "sceneport:joint"  # customData: joint token an attachment hangs from
 GENERATED_KEY = "sceneport:generated"  # customData: a prim added only for USD's sake (dropped on load)
+BLENDER_GENERATED_KEY = "Blender:generated"  # Blender's tag for its exporter's /root (dropped on load too)
 JOINT_OP = "sceneportJoint"  # xformOp suffix placing an attachment at its joint
 ACTIVE_CLIP_KEY = "sceneport:activeClip"  # root layer customLayerData: name of the clip on the timeline
 FBX_TYPE_KEY = "sceneport:fbxType"  # customData of a shader port: its FBX [type, subtype, flags], if not the inferred one
@@ -160,7 +168,10 @@ def scene_from_stage(stage: Usd.Stage) -> Scene:
     up = "+" + UsdGeom.GetStageUpAxis(stage)
     front, right = IMPLIED_AXES[up]
     scene = Scene(meters_per_unit=_meters_per_unit(stage), up_axis=up, front_axis=front, right_axis=right)
-    _Reader().read(stage, scene)
+    reader = _Reader()
+    reader.read(stage, scene)
+    if reader.z_pole_domes:  # sceneport's dome lights have their image pole on +Y
+        scene = reframe(scene, {node: POLE_Z_TO_Y for node in reader.z_pole_domes})
     return scene
 
 
@@ -314,7 +325,7 @@ class _Writer:
             parent = parent.AppendChild("root")
             root = UsdGeom.Xform.Define(self.stage, parent).GetPrim()
             root.SetCustomDataByKey(GENERATED_KEY, True)
-            root.SetCustomDataByKey("Blender:generated", True)  # Blender's own tag: its importer then skips it too
+            root.SetCustomDataByKey(BLENDER_GENERATED_KEY, True)  # Blender's own tag: its importer then skips it too
         taken: set[str] = set()
         root_paths = []
         wrapper: tuple[Sdf.Path, set[str]] | None = None
@@ -347,15 +358,20 @@ class _Writer:
         mesh = node.mesh
         own_skeleton = mesh is not None and bool(mesh.blend_shapes) and mesh.skin is None
         prim_type = UsdSkel.Root if own_skeleton or node in self.skel_roots else UsdGeom.Xform
-        if node.camera is not None:
+        special = {UsdGeom.Camera: node.camera, UsdLux.DomeLight: node.light}  # schemas a node's own prim can be
+        for schema, value in special.items():
+            if value is None:
+                continue
             if prim_type is UsdGeom.Xform:
-                prim_type = UsdGeom.Camera
+                prim_type = schema
             else:
-                warnings.warn(f"{node.name!r}: a camera can't share its prim with a SkelRoot; camera not written")
+                warnings.warn(f"{node.name!r}: a {schema.__name__} can't share its prim with a {prim_type.__name__}; not written")
         xform = prim_type.Define(self.stage, path)
         _set_display_name(xform.GetPrim(), node.name)
         if prim_type is UsdGeom.Camera:
             _write_camera(UsdGeom.Camera(xform.GetPrim()), node.camera, self.scene.meters_per_unit)
+        elif prim_type is UsdLux.DomeLight:
+            _write_dome_light(UsdLux.DomeLight(xform.GetPrim()), node.light, self.directory)
         if joint is not None:  # attachment of a joint: start at the joint's rest pose
             token, matrix = joint
             xform.AddTransformOp(precision=_DOUBLE, opSuffix=JOINT_OP).Set(Gf.Matrix4d(matrix.T.tolist()))
@@ -751,6 +767,42 @@ def _write_camera(usd_camera: UsdGeom.Camera, camera: Camera, meters_per_unit: f
         usd_camera.CreateFStopAttr(camera.f_stop)
 
 
+# A DomeLight_1 whose image pole is Z, turned to sceneport's +Y pole: a 90 degree turn about X (+Y -> +Z).
+POLE_Z_TO_Y = np.array([[1.0, 0, 0, 0], [0, 0, -1, 0], [0, 1, 0, 0], [0, 0, 0, 1]])
+
+
+def _write_dome_light(dome: UsdLux.DomeLight, light: Light, directory: Path | None) -> None:
+    """A classic DomeLight (pole along +Y, like sceneport's Light): the form most readers support."""
+    dome.CreateIntensityAttr(float(light.intensity))
+    dome.CreateExposureAttr(float(light.exposure))
+    dome.CreateColorAttr(Gf.Vec3f(*(float(c) for c in light.color)))
+    dome.CreateTextureFormatAttr(light.texture_format)
+    if light.texture is not None:
+        path = texture_path(light.texture, directory)
+        dome.CreateTextureFileAttr(Sdf.AssetPath(path))
+
+
+def _read_dome_light(prim: Usd.Prim) -> tuple[Light, bool]:
+    """(the light, whether its image pole is Z): a DomeLight_1 can put the pole on Z (poleAxis "Z", or "scene" on a
+    Z-up stage); the classic DomeLight's pole is always +Y."""
+    api = UsdLux.LightAPI(prim)
+    dome = UsdLux.DomeLight_1(prim) if prim.IsA(UsdLux.DomeLight_1) else UsdLux.DomeLight(prim)
+    file = _static_value(dome.GetTextureFileAttr())
+    light = Light(
+        "dome",
+        color=np.array(_static_value(api.GetColorAttr()), dtype=np.float64),
+        intensity=float(_static_value(api.GetIntensityAttr())),
+        exposure=float(_static_value(api.GetExposureAttr())),
+        texture=_shade_value(file) if file and file.path else None,
+        texture_format=str(_static_value(dome.GetTextureFormatAttr())),
+    )
+    pole_z = False
+    if prim.IsA(UsdLux.DomeLight_1):
+        pole = str(dome.GetPoleAxisAttr().Get())
+        pole_z = pole == "Z" or (pole == "scene" and UsdGeom.GetStageUpAxis(prim.GetStage()) == UsdGeom.Tokens.z)
+    return light, pole_z
+
+
 def _read_camera(prim: Usd.Prim, meters_per_unit: float) -> Camera:
     """A Camera prim's lens (schema defaults where unauthored); USD's lens units converted to mm."""
     usd_camera, mm = UsdGeom.Camera(prim), _lens_unit_mm(meters_per_unit)
@@ -921,6 +973,7 @@ class _Reader:
         self.bound_shapes: dict[Sdf.Path, list[tuple[Mesh, dict[str, str]]]] = {}
         self.node_channels: list[Channel] = []  # time-sampled xformOps: the timeline's clip
         self.point_samples: list[PointSamples] = []  # time-sampled mesh points: the timeline's clip too
+        self.z_pole_domes: list[Node] = []  # DomeLight_1 nodes whose image pole is Z (turned to +Y after reading)
         self.fps = 24.0
         self.materials: dict[Sdf.Path, Material] = {}
 
@@ -942,7 +995,8 @@ class _Reader:
             self.read_skeleton(prim, siblings)
             return
         children = list(prim.GetFilteredChildren(_PREDICATE))
-        generated = prim.GetCustomDataByKey(GENERATED_KEY)  # a wrapper sceneport added (root Xform, SkelRoot)
+        # A wrapper sceneport added (root Xform, SkelRoot), or the /root of a Blender export.
+        generated = prim.GetCustomDataByKey(GENERATED_KEY) or prim.GetCustomDataByKey(BLENDER_GENERATED_KEY)
         if generated or not prim.IsA(UsdGeom.Xformable):  # Scope, Material, ...: no transform, keep looking below
             for child in children:
                 self.read_prim(child, siblings)
@@ -951,6 +1005,10 @@ class _Reader:
         node = Node(_display_name(prim), _read_transform(UsdGeom.Xformable(prim)))
         if prim.IsA(UsdGeom.Camera):
             node.camera = _read_camera(prim, self.meters_per_unit)
+        elif prim.IsA(UsdLux.DomeLight) or prim.IsA(UsdLux.DomeLight_1):
+            node.light, pole_z = _read_dome_light(prim)
+            if pole_z:
+                self.z_pole_domes.append(node)
         siblings.append(node)
         self.read_node_samples(UsdGeom.Xformable(prim), node)
         if prim.IsA(UsdGeom.Mesh):
