@@ -130,8 +130,9 @@ sceneport convert scan.ply scan.usd
 ```
 
 Meshes, blend shapes, skins, animation, materials and cameras carry over between FBX
-and USD; HDRI environment (dome) lights are read and written by USD only
-(`scene.environment`, `scene.add_environment("sky.exr")`) (materials as Phong in FBX; see the conventions below). Per-vertex
+and USD, as do lights (sun, point, spot, area; FBX keeps fewer of their settings);
+HDRI environment (dome) lights are USD only (`scene.environment`,
+`scene.add_environment("sky.exr")`) (materials as Phong in FBX; see the conventions below). Per-vertex
 animation (time-sampled points) is kept by USD only. For Blender, FBX export
 splits in-between shapes into plain ones and rewrites mirrored joints (negative
 scale) without mirroring, since its importer can't handle either; both keep the

@@ -28,10 +28,12 @@ usd-core. Xformable prims become Nodes; other prims (Scope, Material, ...) are
 flattened away. Transform stacks that match the one written here are read
 exactly; others (and joint rest matrices) are decomposed from matrices.
 
-Lights: a node's dome (environment) light is the node's own prim, a classic
-DomeLight (image pole along +Y, as in sceneport). DomeLight and DomeLight_1 are
-read; a DomeLight_1 whose pole is Z gets its node turned so the pole is +Y.
-Other UsdLux lights are read as plain nodes for now.
+Lights: a node's light is the node's own prim, a UsdLux DomeLight (the classic
+one: image pole along +Y, as in sceneport), DistantLight, SphereLight (with
+ShapingAPI for a spotlight cone), RectLight, DiskLight or CylinderLight, with
+ShadowAPI when shadows are off or coloured. DomeLight_1 is read too; one whose
+pole is Z gets its node turned so the pole is +Y. Geometry, portal and plugin
+lights are read as plain nodes, with a warning.
 
 Materials: every UsdShade Material <-> a generic Material graph (shaders, node
 graphs, port values and connections, whatever the node library). Materials are
@@ -358,7 +360,8 @@ class _Writer:
         mesh = node.mesh
         own_skeleton = mesh is not None and bool(mesh.blend_shapes) and mesh.skin is None
         prim_type = UsdSkel.Root if own_skeleton or node in self.skel_roots else UsdGeom.Xform
-        special = {UsdGeom.Camera: node.camera, UsdLux.DomeLight: node.light}  # schemas a node's own prim can be
+        light_schema = LIGHT_SCHEMAS[node.light.type] if node.light is not None else None
+        special = {UsdGeom.Camera: node.camera, light_schema: node.light}  # schemas a node's own prim can be
         for schema, value in special.items():
             if value is None:
                 continue
@@ -370,8 +373,8 @@ class _Writer:
         _set_display_name(xform.GetPrim(), node.name)
         if prim_type is UsdGeom.Camera:
             _write_camera(UsdGeom.Camera(xform.GetPrim()), node.camera, self.scene.meters_per_unit)
-        elif prim_type is UsdLux.DomeLight:
-            _write_dome_light(UsdLux.DomeLight(xform.GetPrim()), node.light, self.directory)
+        elif prim_type is light_schema:
+            _write_light(xform.GetPrim(), node.light, self.directory)
         if joint is not None:  # attachment of a joint: start at the joint's rest pose
             token, matrix = joint
             xform.AddTransformOp(precision=_DOUBLE, opSuffix=JOINT_OP).Set(Gf.Matrix4d(matrix.T.tolist()))
@@ -771,35 +774,112 @@ def _write_camera(usd_camera: UsdGeom.Camera, camera: Camera, meters_per_unit: f
 POLE_Z_TO_Y = np.array([[1.0, 0, 0, 0], [0, 0, -1, 0], [0, 1, 0, 0], [0, 0, 0, 1]])
 
 
-def _write_dome_light(dome: UsdLux.DomeLight, light: Light, directory: Path | None) -> None:
-    """A classic DomeLight (pole along +Y, like sceneport's Light): the form most readers support."""
-    dome.CreateIntensityAttr(float(light.intensity))
-    dome.CreateExposureAttr(float(light.exposure))
-    dome.CreateColorAttr(Gf.Vec3f(*(float(c) for c in light.color)))
-    dome.CreateTextureFormatAttr(light.texture_format)
-    if light.texture is not None:
-        path = texture_path(light.texture, directory)
-        dome.CreateTextureFileAttr(Sdf.AssetPath(path))
+# sceneport light type -> the UsdLux schema it is written as (DomeLight: the classic one, pole +Y).
+LIGHT_SCHEMAS = {
+    "dome": UsdLux.DomeLight, "distant": UsdLux.DistantLight, "sphere": UsdLux.SphereLight,
+    "rect": UsdLux.RectLight, "disk": UsdLux.DiskLight, "cylinder": UsdLux.CylinderLight,
+}  # fmt: skip
+# ... and back, DomeLight_1 included; other UsdLux lights (geometry, portal, plugin) stay plain nodes.
+READ_LIGHT_SCHEMAS = [(UsdLux.DomeLight_1, "dome"), *((schema, name) for name, schema in LIGHT_SCHEMAS.items())]
 
 
-def _read_dome_light(prim: Usd.Prim) -> tuple[Light, bool]:
-    """(the light, whether its image pole is Z): a DomeLight_1 can put the pole on Z (poleAxis "Z", or "scene" on a
-    Z-up stage); the classic DomeLight's pole is always +Y."""
+def _write_light(prim: Usd.Prim, light: Light, directory: Path | None) -> None:
+    """The light's UsdLux inputs on its prim; shaping (spot cone) and shadow APIs only when they say something."""
     api = UsdLux.LightAPI(prim)
-    dome = UsdLux.DomeLight_1(prim) if prim.IsA(UsdLux.DomeLight_1) else UsdLux.DomeLight(prim)
-    file = _static_value(dome.GetTextureFileAttr())
+    api.CreateIntensityAttr(float(light.intensity))
+    api.CreateExposureAttr(float(light.exposure))
+    api.CreateColorAttr(Gf.Vec3f(*(float(c) for c in light.color)))
+    if light.temperature is not None:
+        api.CreateEnableColorTemperatureAttr(True)
+        api.CreateColorTemperatureAttr(float(light.temperature))
+    api.CreateDiffuseAttr(float(light.diffuse))
+    api.CreateSpecularAttr(float(light.specular))
+    api.CreateNormalizeAttr(bool(light.normalize))
+    kind = light.type
+    if kind == "dome":
+        dome = UsdLux.DomeLight(prim)
+        dome.CreateTextureFormatAttr(light.texture_format)
+        if light.texture is not None:
+            dome.CreateTextureFileAttr(Sdf.AssetPath(texture_path(light.texture, directory)))
+    elif kind == "distant":
+        UsdLux.DistantLight(prim).CreateAngleAttr(float(light.angle))
+    elif kind == "sphere":
+        sphere = UsdLux.SphereLight(prim)
+        sphere.CreateRadiusAttr(float(light.radius))
+        sphere.CreateTreatAsPointAttr(light.radius == 0.0)
+        if light.cone_angle is not None:
+            shaping = UsdLux.ShapingAPI.Apply(prim)
+            shaping.CreateShapingConeAngleAttr(float(light.cone_angle))
+            shaping.CreateShapingConeSoftnessAttr(float(light.cone_softness))
+    elif kind == "rect":
+        rect = UsdLux.RectLight(prim)
+        rect.CreateWidthAttr(float(light.width))
+        rect.CreateHeightAttr(float(light.height))
+        if light.texture is not None:
+            rect.CreateTextureFileAttr(Sdf.AssetPath(texture_path(light.texture, directory)))
+    elif kind == "disk":
+        UsdLux.DiskLight(prim).CreateRadiusAttr(float(light.radius))
+    elif kind == "cylinder":
+        cylinder = UsdLux.CylinderLight(prim)
+        cylinder.CreateRadiusAttr(float(light.radius))
+        cylinder.CreateLengthAttr(float(light.length))
+    if not light.cast_shadows or np.any(light.shadow_color):
+        shadow = UsdLux.ShadowAPI.Apply(prim)
+        shadow.CreateShadowEnableAttr(bool(light.cast_shadows))
+        shadow.CreateShadowColorAttr(Gf.Vec3f(*(float(c) for c in light.shadow_color)))
+    if prim.IsA(UsdGeom.Boundable):  # sized lights: viewers cull by extent
+        extent = UsdGeom.Boundable.ComputeExtentFromPlugins(UsdGeom.Boundable(prim), Usd.TimeCode.Default())
+        if extent is not None:
+            UsdGeom.Boundable(prim).CreateExtentAttr(extent)
+
+
+def _read_light(prim: Usd.Prim, kind: str) -> tuple[Light, bool]:
+    """(the light, whether its image pole is Z): a DomeLight_1 can put the pole on Z (poleAxis "Z", or "scene" on a
+    Z-up stage); the classic DomeLight's pole is always +Y. Unset inputs get the schemas' defaults."""
+    api = UsdLux.LightAPI(prim)
+    value = lambda attr: _static_value(attr)  # noqa: E731
     light = Light(
-        "dome",
-        color=np.array(_static_value(api.GetColorAttr()), dtype=np.float64),
-        intensity=float(_static_value(api.GetIntensityAttr())),
-        exposure=float(_static_value(api.GetExposureAttr())),
-        texture=_shade_value(file) if file and file.path else None,
-        texture_format=str(_static_value(dome.GetTextureFormatAttr())),
+        kind,
+        color=np.array(value(api.GetColorAttr()), dtype=np.float64),
+        intensity=float(value(api.GetIntensityAttr())),
+        exposure=float(value(api.GetExposureAttr())),
+        temperature=float(value(api.GetColorTemperatureAttr())) if value(api.GetEnableColorTemperatureAttr()) else None,
+        diffuse=float(value(api.GetDiffuseAttr())),
+        specular=float(value(api.GetSpecularAttr())),
+        normalize=bool(value(api.GetNormalizeAttr())),
     )
     pole_z = False
-    if prim.IsA(UsdLux.DomeLight_1):
-        pole = str(dome.GetPoleAxisAttr().Get())
-        pole_z = pole == "Z" or (pole == "scene" and UsdGeom.GetStageUpAxis(prim.GetStage()) == UsdGeom.Tokens.z)
+    if kind == "dome":
+        dome = UsdLux.DomeLight_1(prim) if prim.IsA(UsdLux.DomeLight_1) else UsdLux.DomeLight(prim)
+        file = value(dome.GetTextureFileAttr())
+        light.texture = _shade_value(file) if file and file.path else None
+        light.texture_format = str(value(dome.GetTextureFormatAttr()))
+        if prim.IsA(UsdLux.DomeLight_1):
+            pole = str(dome.GetPoleAxisAttr().Get())
+            pole_z = pole == "Z" or (pole == "scene" and UsdGeom.GetStageUpAxis(prim.GetStage()) == UsdGeom.Tokens.z)
+    elif kind == "distant":
+        light.angle = float(value(UsdLux.DistantLight(prim).GetAngleAttr()))
+    elif kind == "sphere":
+        sphere = UsdLux.SphereLight(prim)
+        light.radius = 0.0 if value(sphere.GetTreatAsPointAttr()) else float(value(sphere.GetRadiusAttr()))
+        if prim.HasAPI(UsdLux.ShapingAPI):
+            shaping = UsdLux.ShapingAPI(prim)
+            light.cone_angle = float(value(shaping.GetShapingConeAngleAttr()))
+            light.cone_softness = float(value(shaping.GetShapingConeSoftnessAttr()))
+    elif kind == "rect":
+        rect = UsdLux.RectLight(prim)
+        light.width, light.height = float(value(rect.GetWidthAttr())), float(value(rect.GetHeightAttr()))
+        file = value(rect.GetTextureFileAttr())
+        light.texture = _shade_value(file) if file and file.path else None
+    elif kind == "disk":
+        light.radius = float(value(UsdLux.DiskLight(prim).GetRadiusAttr()))
+    elif kind == "cylinder":
+        cylinder = UsdLux.CylinderLight(prim)
+        light.radius, light.length = float(value(cylinder.GetRadiusAttr())), float(value(cylinder.GetLengthAttr()))
+    if prim.HasAPI(UsdLux.ShadowAPI):
+        shadow = UsdLux.ShadowAPI(prim)
+        light.cast_shadows = bool(value(shadow.GetShadowEnableAttr()))
+        light.shadow_color = np.array(value(shadow.GetShadowColorAttr()), dtype=np.float64)
     return light, pole_z
 
 
@@ -1005,10 +1085,12 @@ class _Reader:
         node = Node(_display_name(prim), _read_transform(UsdGeom.Xformable(prim)))
         if prim.IsA(UsdGeom.Camera):
             node.camera = _read_camera(prim, self.meters_per_unit)
-        elif prim.IsA(UsdLux.DomeLight) or prim.IsA(UsdLux.DomeLight_1):
-            node.light, pole_z = _read_dome_light(prim)
+        elif (kind := next((name for schema, name in READ_LIGHT_SCHEMAS if prim.IsA(schema)), None)) is not None:
+            node.light, pole_z = _read_light(prim, kind)
             if pole_z:
                 self.z_pole_domes.append(node)
+        elif prim.HasAPI(UsdLux.LightAPI) or prim.IsA(UsdLux.BoundableLightBase) or prim.IsA(UsdLux.NonboundableLightBase):
+            warnings.warn(f"{prim.GetPath()}: {prim.GetTypeName() or 'this'} light isn't supported; read as a plain node")
         siblings.append(node)
         self.read_node_samples(UsdGeom.Xformable(prim), node)
         if prim.IsA(UsdGeom.Mesh):

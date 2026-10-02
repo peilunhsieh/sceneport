@@ -1,7 +1,8 @@
 """Scene rewrites applied before writing FBX, for readers that can't handle everything FBX can hold.
 
 Both keep what the scene looks like at every frame; they change how it's expressed.
-(Cameras are also turned from looking down -Z to FBX's +X here, always; see reframe.)
+(Cameras are also turned from looking down -Z to FBX's +X, and lights from shining down -Z
+to FBX's -Y, here, always; see interop/reframe.py.)
 
 - split_inbetweens: Blender's FBX importer refuses in-between shapes. A shape's
   weight interpolates linearly through its in-betweens, so it equals a sum of
@@ -36,6 +37,9 @@ FLIP[3, 3] = 1.0  # -I on the linear part: a point reflection
 # A camera looking down -Z (sceneport, USD) turned to look down +X (FBX): a 90 degree turn about Y,
 # as Blender's FBX exporter does (MAT_CONVERT_CAMERA).
 CAMERA_TO_FBX = np.array([[0.0, 0, 1, 0], [0, 1, 0, 0], [-1, 0, 0, 0], [0, 0, 0, 1]])
+# A light shining down -Z (sceneport, USD) turned to shine down -Y (FBX): a 90 degree turn about X,
+# as Blender's FBX exporter does (MAT_CONVERT_LIGHT).
+LIGHT_TO_FBX = np.array([[1.0, 0, 0, 0], [0, 0, -1, 0], [0, 1, 0, 0], [0, 0, 0, 1]])
 
 
 def prepare(scene: Scene, *, unmirror_joints: bool = True, split_inbetweens: bool = True) -> Scene:
@@ -46,9 +50,11 @@ def prepare(scene: Scene, *, unmirror_joints: bool = True, split_inbetweens: boo
         flipped = _mirrored_joints(scene)
         if flipped:
             scene = _unmirror(scene, flipped)
-    cameras = [node for node, _ in scene.walk() if node.camera is not None]
-    if cameras:  # always: FBX cameras look down +X
-        scene = reframe(scene, {node: CAMERA_TO_FBX for node in cameras})
+    # Always: FBX cameras look down +X and lights shine down -Y (a dome isn't an FBX light: left as is).
+    frames = {node: CAMERA_TO_FBX for node, _ in scene.walk() if node.camera is not None}
+    frames.update({node: LIGHT_TO_FBX for node, _ in scene.walk() if node.light is not None and node.light.type != "dome"})
+    if frames:
+        scene = reframe(scene, frames)
     return scene
 
 

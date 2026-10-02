@@ -14,6 +14,7 @@ from .blendshapes import write_blend_shapes
 from .binary import write
 from .binary.node import FBXNode, Prop
 from .camera import write_camera
+from .light import write_light
 from .compat import prepare
 from .document import ROOT_ID, FBXDocument, FBXObject, Properties70
 from .materials import MaterialWriter, material_layer
@@ -53,7 +54,7 @@ def document_from_scene(
     """
     if any(clip.point_samples for clip in scene.animations):
         warnings.warn("FBX can't hold per-vertex animation (point samples); it is not written (USD keeps it)")
-    if any(node.light is not None for node, _ in scene.walk()):
+    if any(node.light is not None and node.light.type == "dome" for node, _ in scene.walk()):
         warnings.warn("FBX has no environment (dome) light; it is written as an empty node (USD keeps it)")
     scene = prepare(scene, unmirror_joints=unmirror_joints, split_inbetweens=split_inbetweens)
     doc = FBXDocument(version=version, global_settings=write_global_settings(scene))
@@ -85,6 +86,8 @@ def document_from_scene(
         doc.connect(model, parent_id)
         if node.camera is not None:
             doc.connect(write_camera(doc, node), model)
+        if node.light is not None and node.light.type != "dome":
+            doc.connect(write_light(doc, node), model)
         if node.joint:
             attribute = doc.add_object("NodeAttribute", node.name, model.subtype, cls="NodeAttribute", children=[
                 FBXNode("TypeFlags", [Prop("S", "Skeleton")]),
@@ -124,6 +127,8 @@ def _model_subtype(node: Node) -> str:
         return node.extras.get("fbx", {}).get("subtype", "LimbNode")
     if node.camera is not None:
         return "Camera"
+    if node.light is not None and node.light.type != "dome":  # FBX has no dome light: an empty
+        return "Light"
     return "Mesh" if node.mesh is not None else "Null"
 
 

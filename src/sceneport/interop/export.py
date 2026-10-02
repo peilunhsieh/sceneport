@@ -23,7 +23,7 @@ def warn_dropped(scene: Scene, format_name: str, *, materials: bool = True) -> N
             ("blend shapes", any(m.blend_shapes for m in meshes)),
             ("skins", any(m.skin is not None for m in meshes)),
             ("animation", bool(scene.animations)),  # includes per-vertex (point sample) animation
-            ("environment lights", any(node.light is not None for node, _ in scene.walk())),
+            ("lights", any(node.light is not None for node, _ in scene.walk())),
             ("materials", materials and (bool(scene.materials) or any(node.materials for node, _ in scene.walk()))),
         )
         if present

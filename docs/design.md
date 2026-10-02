@@ -300,25 +300,37 @@ future changes can keep them consistent (or revisit them deliberately).
 ## Lights
 
 - `Node.light` (scene/light.py): a light on a node, placed and oriented by the
-  node, like cameras. For now one type, "dome": an environment light lit by an
-  image all around the scene (an HDRI). Brightness follows USD: intensity x
-  2^exposure, times color.
+  node, like cameras. Types and values follow USD (UsdLux): "dome" (an
+  environment image all around, an HDRI), "distant" (sun), "sphere" (point; a
+  spotlight with `cone_angle`), "rect", "disk", "cylinder". Brightness is
+  intensity x 2^exposure, times color (and colour temperature when set); sizes in
+  scene units, angles in degrees. Lights shine down the node's -Z.
 - **The environment is a node with a scene-level shortcut**, not a scene
   setting: as a node it reuses transforms (rotating the node turns the sky),
   animation, naming and reframing, and USD round trips stay exact (several
   domes, their place in the hierarchy). `Scene.environment` returns the first
   dome node and `Scene.add_environment(texture, rotation=...)` creates one, for
-  the common one-sky case (Blender's World).
-- The image's pole (the "up" of a lat-long image) lies along the node's +Y,
-  USD's classic DomeLight convention. USD: written as a classic `DomeLight` on
-  the node's prim (what Blender writes, with a (90, 0, 90) rotation for its
-  Z-up World); `DomeLight` and `DomeLight_1` are read, and a `DomeLight_1`
-  whose `poleAxis` puts the pole on Z gets its node turned to +Y
-  (interop/reframe.py). The texture path follows the material texture rules.
-  Texture format defaults to USD's "automatic" (deduced from the file).
-- FBX has no environment light (only a flat ambient colour): the node is written
-  as an empty, with a warning; OBJ and PLY warn too. Other light types (point,
-  sun, spot, area) and FBX lights are not supported yet.
+  the common one-sky case (Blender's World). A dome image's pole lies along the
+  node's +Y (USD's classic DomeLight convention).
+- USD: each type is its UsdLux prim on the node's own prim (a classic
+  `DomeLight`, `DistantLight`, `SphereLight` + `ShapingAPI` for spots,
+  `RectLight`, `DiskLight`, `CylinderLight`), `ShadowAPI` only when shadows are
+  off or coloured, and an extent on sized lights (viewers cull by it).
+  `DomeLight_1` is read too; one whose `poleAxis` puts the pole on Z gets its
+  node turned to +Y (interop/reframe.py). Geometry, portal and plugin lights are
+  read as plain nodes with a warning.
+- FBX (interop/fbx/light.py), following Blender's exporter and importer: types
+  point / directional / spot / area, Color, CastShadows, ShadowColor, spot
+  `OuterAngle` = the full cone and `InnerAngle` = outer x (1 - softness). FBX
+  lights shine down -Y, so light nodes are turned 90 degrees about X on write and
+  back on read (Blender's `MAT_CONVERT_LIGHT`). FBX has no light units:
+  Intensity = Blender watts x 100 (Blender's FBX exporter) and USD intensity =
+  watts / pi, or sun strength / 4 (Blender's USD exporter), so brightness
+  survives Blender <-> FBX <-> USD. Dome lights (FBX has none: an empty),
+  area sizes, cylinders, colour temperature and diffuse / specular / normalize
+  are dropped with a warning. (Blender's FBX importer reads point, sun and spot
+  only: area lights arrive as point lights.)
+- Light and camera properties aren't animatable yet (their nodes are).
 
 ## Animation
 
