@@ -8,6 +8,7 @@ changed parts are copies, unchanged meshes and arrays are shared.
 from __future__ import annotations
 
 import dataclasses
+import warnings
 
 import numpy as np
 from numpy.typing import NDArray
@@ -15,6 +16,9 @@ from numpy.typing import NDArray
 from ..math import TICKS_PER_SECOND, decompose_matrix
 from ..scene.animation import Animation, Channel
 from ..scene.types import Mesh, Node, Scene, Transform
+
+FLIP = -np.eye(4)
+FLIP[3, 3] = 1.0  # -I on the linear part: a point reflection
 
 
 def copy_scene(scene: Scene, meshes: dict[int, Mesh], transforms: dict[Node, Transform], channels) -> Scene:
@@ -116,3 +120,27 @@ def _transform(local: NDArray, original: Transform, geometric: NDArray | None = 
         translation=translation, rotation=rotation, scale=scale, rotation_order=original.rotation_order,
         geometric_translation=g_translation, geometric_rotation=g_rotation, geometric_scale=g_scale,
     )  # fmt: skip
+
+
+def mirrored_joints(scene: Scene) -> set[Node]:
+    """Joints whose rest world matrix is mirrored (negative determinant), e.g. a rig's right side built by
+    mirroring; their children inherit the mirror. Blender can't make bones of them."""
+    return {node for node, world in scene.walk() if node.joint and np.linalg.det(world[:3, :3]) < 0}
+
+
+def unmirror(scene: Scene, joints: set[Node] | None = None) -> Scene:
+    """`scene` with mirrored joints (all of them by default) re-expressed without negative scale: each joint's
+    frame is turned by -I, so skinning and joint positions don't change; the joints' axes point the other way."""
+    joints = mirrored_joints(scene) if joints is None else joints
+    for mesh in scene.meshes:  # a skin that mirrors relative to its bind pose can't be expressed without a mirror
+        if mesh.skin is None:
+            continue
+        bind_mirrored = np.linalg.det(mesh.skin.bind_world()[:, :3, :3]) < 0
+        odd = [j.name for j, b in zip(mesh.skin.joints, bind_mirrored) if (j in joints) != bool(b)]
+        if odd:
+            warnings.warn(
+                f"mesh {mesh.name!r}: joints {odd[:3]}{'...' if len(odd) > 3 else ''} are mirrored in their rest pose "
+                "but not their bind pose (or the reverse); they can't be fully unmirrored, so Blender may still "
+                "drop the animation"
+            )
+    return reframe(scene, {node: FLIP for node in joints}) if joints else scene

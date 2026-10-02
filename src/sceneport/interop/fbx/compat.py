@@ -30,10 +30,8 @@ from numpy.typing import NDArray
 
 from ...scene.animation import Animation, Channel
 from ...scene.types import BlendShape, Mesh, Node, Scene
-from ..reframe import copy_scene, key_times, reframe
+from ..reframe import copy_scene, key_times, mirrored_joints, reframe, unmirror
 
-FLIP = -np.eye(4)
-FLIP[3, 3] = 1.0  # -I on the linear part: a point reflection
 # A camera looking down -Z (sceneport, USD) turned to look down +X (FBX): a 90 degree turn about Y,
 # as Blender's FBX exporter does (MAT_CONVERT_CAMERA).
 CAMERA_TO_FBX = np.array([[0.0, 0, 1, 0], [0, 1, 0, 0], [-1, 0, 0, 0], [0, 0, 0, 1]])
@@ -47,9 +45,9 @@ def prepare(scene: Scene, *, unmirror_joints: bool = True, split_inbetweens: boo
     if split_inbetweens and any(shape.inbetweens for mesh in scene.meshes for shape in mesh.blend_shapes):
         scene = _split_inbetweens(scene)
     if unmirror_joints:
-        flipped = _mirrored_joints(scene)
+        flipped = mirrored_joints(scene)
         if flipped:
-            scene = _unmirror(scene, flipped)
+            scene = unmirror(scene, flipped)
     # Always: FBX cameras look down +X and lights shine down -Y (a dome isn't an FBX light: left as is).
     frames = {node: CAMERA_TO_FBX for node, _ in scene.walk() if node.camera is not None}
     frames.update({node: LIGHT_TO_FBX for node, _ in scene.walk() if node.light is not None and node.light.type != "dome"})
@@ -119,15 +117,3 @@ def _split_inbetweens(scene: Scene) -> Scene:
         return out
 
     return copy_scene(scene, meshes, {}, channels)
-
-
-# -- mirrored joints -----------------------------------------------------------------
-
-
-def _mirrored_joints(scene: Scene) -> set[Node]:
-    """Joints whose rest world matrix is mirrored (negative determinant)."""
-    return {node for node, world in scene.walk() if node.joint and np.linalg.det(world[:3, :3]) < 0}
-
-
-def _unmirror(scene: Scene, flipped: set[Node]) -> Scene:
-    return reframe(scene, {node: FLIP for node in flipped})

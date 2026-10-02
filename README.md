@@ -127,7 +127,13 @@ scene = sceneport.load("model.usd")  # composed stage: references, payloads, ins
 sceneport convert model.fbx model.usd   # the formats follow the extensions
 sceneport convert model.usdz model.fbx  # .fbx, .usd, .usda, .usdc, .usdz, .obj, .ply
 sceneport convert scan.ply scan.usd
+sceneport convert walk.usd walk_for_blender.usd --unmirror-joints
 ```
+
+Rigs with mirrored joints (negative scale, e.g. a right side built by mirroring
+the left) are valid USD, but Blender drops their animation on import; sceneport
+warns about them, and `--unmirror-joints` (or `unmirror_joints=True`) writes them
+without mirroring and with the same deformation. FBX export always does this.
 
 Meshes, blend shapes, skins, animation, materials and cameras carry over between FBX
 and USD, as do lights (sun, point, spot, area; FBX keeps fewer of their settings);

@@ -79,7 +79,7 @@ from ..scene.light import Light
 from ..scene.material import AssetPath, Connection, Material, NodeGraph, Port, ShaderNode
 from ..scene.pbr import NATIVE_SURFACES, native_surface, preview_surface_nodes
 from .export import texture_path
-from .reframe import reframe
+from .reframe import mirrored_joints, reframe, unmirror
 from .fbx.materials import inferred_fbx_type
 from ..scene.types import BlendShape, Inbetween, Mesh, Node, Primvar, Scene, Skin, Transform
 
@@ -129,27 +129,35 @@ def load(path: str | os.PathLike) -> Scene:
     return scene_from_stage(stage)
 
 
-def save(scene: Scene, path: str | os.PathLike) -> None:
+def save(scene: Scene, path: str | os.PathLike, *, unmirror_joints: bool = False) -> None:
+    """Write `scene` as USD (.usd, .usda, .usdc, .usdz). See stage_from_scene for `unmirror_joints`."""
     path = Path(path)
     if path.suffix.lower() == ".usdz":
         with tempfile.TemporaryDirectory() as tmp:
             # Textures written next to the layer get packaged; missing ones would make packaging fail.
-            stage = stage_from_scene(scene, directory=Path(tmp), missing_textures="drop")
+            stage = stage_from_scene(scene, directory=Path(tmp), missing_textures="drop", unmirror_joints=unmirror_joints)
             layer_path = Path(tmp) / f"{path.stem}.usdc"
             _export(stage, layer_path)
             if not UsdUtils.CreateNewUsdzPackage(Sdf.AssetPath(str(layer_path)), str(path)):
                 raise OSError(f"could not write {path}")
     else:
-        _export(stage_from_scene(scene, directory=path.parent), path)
+        _export(stage_from_scene(scene, directory=path.parent, unmirror_joints=unmirror_joints), path)
 
 
-def stage_from_scene(scene: Scene, *, directory: Path | None = None, missing_textures: str = "keep") -> Usd.Stage:
+def stage_from_scene(
+    scene: Scene, *, directory: Path | None = None, missing_textures: str = "keep", unmirror_joints: bool = False
+) -> Usd.Stage:
     """An in-memory stage holding `scene`.
 
     `directory` is where the stage will be saved: texture paths are made relative
     to it and embedded (FBX) textures are written to its "textures" folder.
     Without it, texture paths are written as authored and embedded ones are dropped.
     `missing_textures="drop"` leaves out (with a warning) texture paths that don't resolve to a file.
+
+    Mirrored joints (negative scale, e.g. a rig's right side) are valid USD, but Blender's importer
+    drops the whole skeleton's animation when it finds them. They are kept by default (with a warning
+    saying so); `unmirror_joints=True` writes them without mirroring, with the same deformation and
+    joint positions (see reframe.unmirror).
     """
     if scene.up_axis not in IMPLIED_AXES:
         raise ValueError(f"USD only supports +Y or +Z up, got {scene.up_axis!r}")
@@ -158,6 +166,14 @@ def stage_from_scene(scene: Scene, *, directory: Path | None = None, missing_tex
         warnings.warn(
             f"USD can't record front/right axes; readers will assume front {front}, right {right} "
             f"(scene has {scene.front_axis}, {scene.right_axis})"
+        )
+    mirrored = mirrored_joints(scene)
+    if mirrored and unmirror_joints:
+        scene = unmirror(scene, mirrored)
+    elif mirrored:
+        warnings.warn(
+            f"{len(mirrored)} joints are mirrored (negative scale): Blender won't import this skeleton's animation; "
+            "save with unmirror_joints=True (sceneport convert --unmirror-joints) for Blender"
         )
     stage = Usd.Stage.CreateInMemory()
     UsdGeom.SetStageMetersPerUnit(stage, scene.meters_per_unit)

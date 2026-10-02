@@ -70,3 +70,25 @@ def test_cli_convert(tmp_path, capsys):
     with pytest.raises(SystemExit) as e:
         main(["convert", str(tmp_path / "rig.fbx"), str(tmp_path / "rig.stl")])
     assert "unsupported file extension '.stl'" in str(e.value)
+
+
+def test_cli_convert_unmirror_joints(tmp_path):
+    from pxr import Usd, UsdSkel
+
+    import sceneport
+
+    from helpers import rig_scene
+
+    scene = rig_scene()
+    scene.find("mid").transform.scale = np.array([-1.0, -1.0, -1.0])
+    skin = scene.meshes[0].skin  # bound in the mirrored pose, like a real mirrored rig
+    skin.inverse_bind = np.linalg.inv(skin.joint_world(scene))
+    sceneport.save(scene, tmp_path / "mirrored.fbx", unmirror_joints=False)  # an FBX that keeps the mirror
+    with pytest.warns(UserWarning, match="mirrored"):
+        main(["convert", str(tmp_path / "mirrored.fbx"), str(tmp_path / "kept.usda")])
+    main(["convert", str(tmp_path / "mirrored.fbx"), str(tmp_path / "blender.usda"), "--unmirror-joints"])
+    for name, mirrored in (("kept.usda", True), ("blender.usda", False)):
+        stage = Usd.Stage.Open(str(tmp_path / name))
+        skeleton = next(UsdSkel.Skeleton(p) for p in stage.Traverse() if p.IsA(UsdSkel.Skeleton))
+        rest = np.array(skeleton.GetRestTransformsAttr().Get())
+        assert (np.linalg.det(rest[:, :3, :3]) < 0).any() == mirrored, name

@@ -54,6 +54,8 @@ def mirrored_rig(scale) -> Scene:
     scene = rig_scene()
     mid, root = scene.find("mid"), scene.find("root")
     mid.transform.scale = np.array(scale, dtype=float)
+    skin = scene.meshes[0].skin  # bound in the mirrored pose, like a real mirrored rig
+    skin.inverse_bind = np.linalg.inv(skin.joint_world(scene))
     scene.animations = [Animation("take", [
         Channel(root, "translation", 1, [0.0, 0.5, 1.0], [0.0, 2.0, 0.0], "cubic"),
         Channel(mid, "rotation", 2, [0.0, 0.5, 1.0], [0.0, 45.0, 90.0]),

@@ -141,7 +141,9 @@ def test_human_female_walk_roundtrip(sample, tmp_path):
     expected = [clip.skinned_vertices(scene, mesh, times) for mesh in scene.meshes]
     for suffix, atol in ((".usdc", 1e-4), (".fbx", 1e-3)):  # cm; FBX stores key values as float32
         path = tmp_path / f"walk{suffix}"
-        sceneport.save(scene, path)
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", "30 joints are mirrored")  # USD keeps them by default
+            sceneport.save(scene, path)
         back = sceneport.load(path)
         (back_clip,) = back.animations
         assert [m.n_vertices for m in back.meshes] == [m.n_vertices for m in scene.meshes], suffix

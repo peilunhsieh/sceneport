@@ -284,13 +284,54 @@ def test_usd_mirrored_joint_roundtrip(scale):
     scene = rig_scene()
     scene.find("mid").transform.scale = np.array(scale, dtype=float)
     scene.animations = [mixed_clip(scene)]
-    back = usd_roundtrip(scene)
+    with pytest.warns(UserWarning, match="2 joints are mirrored"):  # kept by default; Blender drops them
+        back = usd_roundtrip(scene)
     times = scene.animations[0].frame_times()
     np.testing.assert_allclose(
         back.animations[0].skinned_vertices(back, back.meshes[0], times),
         scene.animations[0].skinned_vertices(scene, scene.meshes[0], times),
         atol=1e-5,
     )
+
+
+@pytest.mark.parametrize("scale", [(-1, -1, -1), (-1, 1, 1)])
+def test_usd_unmirror_joints_on_request(scale):
+    """For Blender: no mirrored joint matrix in the file, same deformation and joint positions."""
+    import warnings
+
+    from pxr import UsdSkel
+
+    from sceneport.interop.usd import scene_from_stage, stage_from_scene
+
+    scene = rig_scene()
+    scene.find("mid").transform.scale = np.array(scale, dtype=float)
+    skin = scene.meshes[0].skin  # bound in the mirrored pose, like a real mirrored rig
+    skin.inverse_bind = np.linalg.inv(skin.joint_world(scene))
+    scene.animations = [mixed_clip(scene)]
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UserWarning)  # nothing to warn about
+        stage = stage_from_scene(scene, unmirror_joints=True)
+    skeleton = next(UsdSkel.Skeleton(p) for p in stage.Traverse() if p.IsA(UsdSkel.Skeleton))
+    for name in ("GetRestTransformsAttr", "GetBindTransformsAttr"):
+        matrices = np.array(getattr(skeleton, name)().Get())
+        assert (np.linalg.det(matrices[:, :3, :3]) > 0).all(), name
+    back = scene_from_stage(stage)
+    times = scene.animations[0].frame_times()
+    np.testing.assert_allclose(back.animations[0].skinned_vertices(back, back.meshes[0], times),
+                               scene.animations[0].skinned_vertices(scene, scene.meshes[0], times), atol=1e-5)  # fmt: skip
+    worlds = back.animations[0].world_matrices(back, times)
+    for node, m in scene.animations[0].world_matrices(scene, times).items():
+        np.testing.assert_allclose(worlds[back.find(node.name)][:, :3, 3], m[:, :3, 3], atol=1e-5, err_msg=node.name)
+    assert np.array_equal(scene.find("mid").transform.scale, scale)  # the scene itself is untouched
+
+
+def test_unmirror_warns_when_rest_and_bind_disagree():
+    from sceneport.interop.reframe import unmirror
+
+    scene = rig_scene()
+    scene.find("mid").transform.scale = np.array([-1.0, -1.0, -1.0])  # mirrored at rest, bound unmirrored
+    with pytest.warns(UserWarning, match="can't be fully unmirrored"):
+        unmirror(scene)
 
 
 def test_usd_animation_source_inherited_from_skel_root():

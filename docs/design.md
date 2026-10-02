@@ -174,6 +174,17 @@ future changes can keep them consistent (or revisit them deliberately).
   mirrored joint (negative determinant, e.g. a rig's right side) must keep its
   reflection in the scale (written as (-1, -1, -1) x size); positive scales
   would turn the reflection into a wrong rotation.
+- **Mirrored joints and Blender.** Mirrored joints are valid in USD and FBX, but
+  Blender can't make bones of them: its USD importer drops the whole skeleton's
+  animation, its FBX importer misplaces the mirrored chains.
+  `interop/reframe.unmirror` re-expresses them without mirroring (each one's
+  frame turned by -I; skinning and joint positions unchanged, the joints' axes
+  point the other way). FBX export does this by default (`unmirror_joints=False`
+  keeps them); USD keeps them by default, faithful to the source, and warns when
+  a scene has mirrored joints (`unmirror_joints=True`, or
+  `sceneport convert --unmirror-joints`, for Blender). Detection uses the rest
+  pose; a joint mirrored in only its rest or only its bind pose can't be fully
+  unmirrored (the skin itself mirrors), and is reported with a warning.
 
 ## Materials
 

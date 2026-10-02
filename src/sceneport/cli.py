@@ -26,7 +26,13 @@ def _convert(args: argparse.Namespace) -> None:
     scene = load(args.input)
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
-    save(scene, output)
+    options = {}
+    if args.unmirror_joints:  # USD keeps mirrored joints unless asked; FBX always unmirrors them
+        if output.suffix.lower() in (".usd", ".usda", ".usdc", ".usdz"):
+            options["unmirror_joints"] = True
+        elif output.suffix.lower() != ".fbx":
+            print(f"sceneport: --unmirror-joints has no effect on {output.suffix} files", file=sys.stderr)
+    save(scene, output, **options)
     joints = sum(node.joint for node, _ in scene.walk())
     clips = ", ".join(f"{clip.name} ({len(clip.frame_times())} frames)" for clip in scene.animations) or "none"
     print(f"{args.input} -> {output}: {len(scene.meshes)} meshes, {joints} joints, animations: {clips}")
@@ -47,6 +53,12 @@ def main(argv: list[str] | None = None) -> None:
     convert = sub.add_parser("convert", help="convert between formats: .fbx, .usd, .usda, .usdc, .usdz, .obj, .ply")
     convert.add_argument("input")
     convert.add_argument("output", help="the format follows the extension")
+    convert.add_argument(
+        "--unmirror-joints",
+        action="store_true",
+        help="USD: write mirrored joints (negative scale) without mirroring, so Blender imports their animation "
+        "(FBX does this always)",
+    )
     convert.set_defaults(func=_convert)
 
     args = parser.parse_args(argv)
