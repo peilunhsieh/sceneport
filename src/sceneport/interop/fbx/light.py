@@ -28,6 +28,29 @@ from .binary.node import FBXNode, Prop
 from .document import FBXDocument, FBXObject, Properties70
 
 POINT, DIRECTIONAL, SPOT, AREA, VOLUME = range(5)
+# Animatable Light fields FBX can hold -> the FBX properties computed from them.
+ANIMATED_PROPERTIES = {
+    "intensity": ("Intensity",), "exposure": ("Intensity",), "color": ("Color",), "shadow_color": ("ShadowColor",),
+    "cone_angle": ("OuterAngle", "InnerAngle"), "cone_softness": ("InnerAngle",),
+}  # fmt: skip
+
+
+def fbx_values(light: Light, fields: set[str], values: dict) -> dict[str, np.ndarray]:
+    """FBX property curves ({property: (F,) or (F, 3) values}) for the animated light `fields`, from
+    attribute_values(), with the same conversions as write_light (watts x 100, the full spot cone)."""
+    props = {p for f in fields for p in ANIMATED_PROPERTIES.get(f, ())}
+    out = {}
+    if "Intensity" in props:
+        out["Intensity"] = values["intensity"] * 2.0 ** values["exposure"] * _watts_per_unit(light.type) * 100.0
+    if "Color" in props:
+        out["Color"] = values["color"]
+    if "ShadowColor" in props:
+        out["ShadowColor"] = values["shadow_color"]
+    if {"OuterAngle", "InnerAngle"} & props and light.is_spot:
+        outer = 2.0 * values["cone_angle"]
+        out["OuterAngle"] = outer
+        out["InnerAngle"] = outer * (1.0 - values["cone_softness"])
+    return out
 
 
 def _watts_per_unit(light_type: str) -> float:

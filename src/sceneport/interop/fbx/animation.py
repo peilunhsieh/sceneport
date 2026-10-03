@@ -26,6 +26,7 @@ from ...math import TICKS_PER_SECOND, euler_from_matrix, quaternion_matrix
 from ...scene.animation import Animation, Channel
 from ...scene.types import Mesh, Node, Scene
 from .binary.node import FBXNode, Prop
+from . import camera as camera_fbx, light as light_fbx
 from .document import FBXDocument, FBXObject
 
 # FBX TimeMode enum (FbxTime::EMode) -> frames per second; 14 = custom (CustomFrameRate).
@@ -75,9 +76,15 @@ def _seconds_to_ticks(seconds) -> np.ndarray:
 
 
 def read_animations(
-    doc: FBXDocument, nodes: dict[int, Node], shapes: dict[int, tuple[Mesh, str]], fps: float
+    doc: FBXDocument,
+    nodes: dict[int, Node],
+    shapes: dict[int, tuple[Mesh, str]],
+    fps: float,
+    attributes: dict[int, tuple[Node, str]] | None = None,
 ) -> list[Animation]:
-    """One Animation per non-empty stack. `shapes` maps BlendShapeChannel ids to (mesh, shape name)."""
+    """One Animation per non-empty stack. `shapes` maps BlendShapeChannel ids to (mesh, shape name);
+    `attributes` maps camera / light NodeAttribute ids to (node, "camera" | "light")."""
+    attributes = attributes or {}
     clips = []
     for stack in doc.iter_objects("AnimationStack"):
         layers = [layer for layer in doc.children_of(stack, "AnimationLayer") if doc.children_of(layer, "AnimationCurveNode")]
@@ -87,7 +94,8 @@ def read_animations(
             warnings.warn(f"animation {stack.name!r}: {len(layers)} layers; only the first is read")
         channels = []
         for curve_node in doc.children_of(layers[0], "AnimationCurveNode"):
-            channels += _read_curve_node(doc, curve_node, nodes, shapes)
+            channels += _read_curve_node(doc, curve_node, nodes, shapes, attributes)
+        channels = _spot_softness(channels)
         if not channels:
             continue
         start, stop = stack.props.get("LocalStart"), stack.props.get("LocalStop")
@@ -102,21 +110,25 @@ def read_animations(
     return clips
 
 
-def _read_curve_node(doc, curve_node: FBXObject, nodes, shapes) -> list[Channel]:
+def _read_curve_node(doc, curve_node: FBXObject, nodes, shapes, attributes) -> list[Channel]:
     targets = [c for c in doc.connections if c.src == curve_node.id and c.kind == "OP" and c.dst in doc.objects]
     if not targets:
         return []
     link = targets[0]
+    components = COMPONENTS
     if link.prop in NODE_PROPERTIES and link.dst in nodes:
         target, prop, scale = nodes[link.dst], NODE_PROPERTIES[link.prop], 1.0
     elif link.prop == "DeformPercent" and link.dst in shapes:
         (target, prop), scale = shapes[link.dst], 0.01
+    elif link.dst in attributes and (found := _attribute_target(link.prop, *attributes[link.dst])) is not None:
+        target, prop, scale = found
+        components = {**COMPONENTS, f"d|{link.prop}": 0}
     else:
         return []  # other animated properties (visibility, materials, ...) aren't supported yet
 
     channels = []
     for connection in doc.connections:
-        if connection.dst != curve_node.id or connection.kind != "OP" or connection.prop not in COMPONENTS:
+        if connection.dst != curve_node.id or connection.kind != "OP" or connection.prop not in components:
             continue
         curve = doc.objects.get(connection.src)
         if curve is None or curve.kind != "AnimationCurve":
@@ -130,7 +142,7 @@ def _read_curve_node(doc, curve_node: FBXObject, nodes, shapes) -> list[Channel]
         channels.append(Channel(
             target,
             prop,
-            COMPONENTS[connection.prop],
+            components[connection.prop],
             _ticks_to_seconds(ticks),
             np.asarray(values, dtype=np.float64) * scale,
             _interpolation(flags, refcount, len(ticks)),
@@ -140,6 +152,35 @@ def _read_curve_node(doc, curve_node: FBXObject, nodes, shapes) -> list[Channel]
             }},
         ))  # fmt: skip
     return channels
+
+
+_INNER_ANGLE = "light:_inner_angle"  # a spot's InnerAngle while reading; turned into cone_softness
+
+
+def _attribute_target(prop: str, node: Node, kind: str) -> tuple[Node, str, float] | None:
+    """(node, channel property, factor from FBX's value) for an animated camera / light NodeAttribute property."""
+    if kind == "camera":
+        found = camera_fbx.from_fbx_curve(prop)
+        return None if found is None else (node, f"camera:{found[0]}", found[1])
+    table = {
+        "Intensity": ("light:intensity", 1.0 / (100.0 * light_fbx._watts_per_unit(node.light.type))),
+        "Color": ("light:color", 1.0), "ShadowColor": ("light:shadow_color", 1.0),
+        "OuterAngle": ("light:cone_angle", 0.5), "InnerAngle": (_INNER_ANGLE, 1.0),
+    }  # fmt: skip
+    return None if prop not in table else (node, *table[prop])
+
+
+def _spot_softness(channels: list[Channel]) -> list[Channel]:
+    """Turn read InnerAngle curves into cone_softness = 1 - inner / outer (outer from the cone_angle curve or rest)."""
+    out = [c for c in channels if c.property != _INNER_ANGLE]
+    for inner in (c for c in channels if c.property == _INNER_ANGLE):
+        node = inner.target
+        cone = next((c for c in channels if c.target is node and c.property == "light:cone_angle"), None)
+        rest = node.light.cone_angle if node.light.cone_angle is not None else 45.0
+        outer = 2.0 * (cone.evaluate(inner.times) if cone is not None else np.full(len(inner.times), rest))
+        softness = 1.0 - inner.values / np.where(outer == 0, 1.0, outer)
+        out.append(Channel(node, "light:cone_softness", 0, inner.times, softness, inner.interpolation))
+    return out
 
 
 def _interpolation(flags, refcount, count: int) -> np.ndarray:
@@ -155,9 +196,15 @@ def _interpolation(flags, refcount, count: int) -> np.ndarray:
 
 
 def write_animations(
-    doc: FBXDocument, scene: Scene, models: dict[Node, FBXObject], shape_channels: dict[tuple[int, str], FBXObject]
+    doc: FBXDocument,
+    scene: Scene,
+    models: dict[Node, FBXObject],
+    shape_channels: dict[tuple[int, str], FBXObject],
+    attributes: dict[Node, FBXObject] | None = None,
 ) -> None:
-    """Stacks for scene.animations. `shape_channels` maps (id(mesh), shape name) to BlendShapeChannels."""
+    """Stacks for scene.animations. `shape_channels` maps (id(mesh), shape name) to BlendShapeChannels;
+    `attributes` maps camera / light nodes to their NodeAttributes (for animated camera / light settings)."""
+    attributes = attributes or {}
     for clip in scene.animations:
         clip.validate()
         start, end = clip.time_range()
@@ -171,9 +218,41 @@ def write_animations(
 
         groups: dict[tuple, list[Channel]] = {}
         for channel in _euler_channels(clip):
-            groups.setdefault((id(channel.target), channel.property), []).append(channel)
+            if channel.attribute is None:
+                groups.setdefault((id(channel.target), channel.property), []).append(channel)
         for channels in groups.values():
             _write_curve_node(doc, layer, channels, models, shape_channels)
+        for node, kind in dict.fromkeys((c.target, c.attribute[0]) for c in clip.channels if c.attribute):
+            _write_attribute_curves(doc, layer, clip, node, kind, attributes.get(node))
+
+
+def _write_attribute_curves(doc, layer, clip: Animation, node: Node, kind: str, owner: FBXObject | None) -> None:
+    """Curves on a camera / light NodeAttribute's properties, baked at every frame (FBX's properties combine
+    several fields, e.g. Intensity from intensity and exposure)."""
+    channels = [c for c in clip.channels if c.target is node and c.attribute and c.attribute[0] == kind]
+    fields = {c.attribute[1] for c in channels}
+    if owner is None:
+        warnings.warn(f"{node.name!r}: its {kind} isn't written to FBX; its animation is skipped")
+        return
+    times = _ticks_to_seconds(np.unique(_seconds_to_ticks(np.concatenate([clip.frame_times(), *(c.times for c in channels)]))))
+    values = clip.attribute_values(node, kind, times)
+    if kind == "camera":
+        props, handled = camera_fbx.fbx_values(fields, values), set(camera_fbx.ANIMATED_PROPERTIES)
+    else:
+        props, handled = light_fbx.fbx_values(node.light, fields, values), set(light_fbx.ANIMATED_PROPERTIES)
+    if fields - handled:
+        warnings.warn(f"{node.name!r}: FBX can't animate its {kind}'s {', '.join(sorted(fields - handled))}; not written")
+    for prop, data in props.items():
+        components = ["d|X", "d|Y", "d|Z"] if np.ndim(data) == 2 else [f"d|{prop}"]
+        data = np.reshape(data, (len(times), len(components)))
+        curve_node = doc.add_object("AnimationCurveNode", prop, cls="AnimCurveNode")
+        for i, component in enumerate(components):
+            curve_node.props.set(component, "Number", float(data[0, i]), flags="A")
+        doc.connect(curve_node, layer)
+        doc.connect(curve_node, owner, prop)
+        for i, component in enumerate(components):
+            curve = _curve_object(doc, Channel(node, f"{kind}:{prop}", i, times, data[:, i]), 1.0, float(data[0, i]))
+            doc.connect(curve, curve_node, component)
 
 
 def _euler_channels(clip: Animation) -> list[Channel]:

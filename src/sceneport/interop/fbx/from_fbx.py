@@ -35,6 +35,7 @@ def scene_from_document(doc: FBXDocument, directory: str | None = None) -> Scene
     meshes: dict[int, Mesh] = {}  # geometry id -> Mesh, so shared geometry stays shared
     nodes: dict[int, Node] = {}
     shapes: dict[int, tuple[Mesh, str]] = {}  # BlendShapeChannel id -> (mesh, shape name)
+    attributes: dict[int, tuple[Node, str]] = {}  # camera / light NodeAttribute id -> (node, "camera" | "light")
 
     models = list(doc.iter_objects("Model"))
     for model in models:
@@ -43,6 +44,10 @@ def scene_from_document(doc: FBXDocument, directory: str | None = None) -> Scene
             node.camera = read_camera(doc, model)
         elif model.subtype == "Light":
             node.light = read_light(doc, model)
+        if node.camera is not None or node.light is not None:
+            kind = "camera" if node.camera is not None else "light"
+            for attribute in doc.children_of(model, "NodeAttribute"):
+                attributes[attribute.id] = (node, kind)
         if node.joint and model.subtype != "LimbNode":
             node.extras["fbx"] = {"subtype": model.subtype}  # e.g. "Root"; LimbNode is the default on write
         for geom in doc.children_of(model, "Geometry"):
@@ -68,7 +73,7 @@ def scene_from_document(doc: FBXDocument, directory: str | None = None) -> Scene
     # Skins last: their joints can be anywhere in the hierarchy.
     for geom_id, mesh in meshes.items():
         mesh.skin = read_skin(doc, doc.objects[geom_id], mesh.n_vertices, nodes)
-    scene.animations = read_animations(doc, nodes, shapes, fps_from_settings(doc.global_settings))
+    scene.animations = read_animations(doc, nodes, shapes, fps_from_settings(doc.global_settings), attributes)
     # FBX cameras look down +X and lights shine down -Y; sceneport's both down -Z.
     frames = {node: np.linalg.inv(CAMERA_TO_FBX) for node in nodes.values() if node.camera is not None}
     frames.update({node: np.linalg.inv(LIGHT_TO_FBX) for node in nodes.values() if node.light is not None})

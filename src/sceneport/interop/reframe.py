@@ -45,7 +45,7 @@ def copy_scene(scene: Scene, meshes: dict[int, Mesh], transforms: dict[Node, Tra
             new.mesh = mesh_map.get(id(new.mesh), new.mesh)
 
     def retarget(channel: Channel) -> Channel:
-        target = mesh_map[id(channel.target)] if channel.is_blend_shape else node_map[channel.target]
+        target = mesh_map[id(channel.target)] if channel.is_blend_shape else node_map[channel.target]  # nodes: transforms, cameras, lights
         return dataclasses.replace(channel, target=target)
 
     def retarget_points(samples):
@@ -92,12 +92,12 @@ def reframe(scene: Scene, frames: dict[Node, NDArray]) -> Scene:
             meshes[id(mesh)] = dataclasses.replace(mesh, skin=dataclasses.replace(mesh.skin, inverse_bind=turns @ mesh.skin.inverse_bind))
 
     def channels(clip: Animation) -> list[Channel]:
-        animated = [n for n in affected if any(c.target is n for c in clip.channels)]
+        animated = [n for n in affected if any(c.target is n and c.is_transform for c in clip.channels)]
         if not animated:
             return clip.channels
-        out = [c for c in clip.channels if c.is_blend_shape or c.target not in animated]
+        out = [c for c in clip.channels if not c.is_transform or c.target not in animated]  # camera / light channels stay
         for node in animated:
-            times = key_times(clip, [c for c in clip.channels if c.target is node])
+            times = key_times(clip, [c for c in clip.channels if c.target is node and c.is_transform])
             local = local_frame(node, node.transform.matrix(**clip.node_values(times)[node]))
             translation, rotation, scale = decompose_matrix(local, node.transform.rotation_order)
             rotation = np.degrees(np.unwrap(np.radians(rotation), axis=0))

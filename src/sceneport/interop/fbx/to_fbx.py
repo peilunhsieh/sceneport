@@ -62,6 +62,7 @@ def document_from_scene(
     first_users: dict[int, tuple[Mesh, FBXObject]] = {}  # id(Mesh) -> (mesh, first Model using it)
     models: dict[Node, FBXObject] = {}
     shape_channels: dict[tuple[int, str], FBXObject] = {}  # (id(Mesh), shape name) -> BlendShapeChannel
+    attributes: dict[Node, FBXObject] = {}  # camera / light node -> its NodeAttribute
     materials = MaterialWriter(doc, directory)
     for material in scene.materials:  # unbound ones too, in scene order
         materials.material(material)
@@ -85,9 +86,11 @@ def document_from_scene(
         model.props_index = 1  # after Version, as Blender writes it
         doc.connect(model, parent_id)
         if node.camera is not None:
-            doc.connect(write_camera(doc, node), model)
+            attributes[node] = write_camera(doc, node)
+            doc.connect(attributes[node], model)
         if node.light is not None and node.light.type != "dome":
-            doc.connect(write_light(doc, node), model)
+            attributes[node] = write_light(doc, node)
+            doc.connect(attributes[node], model)
         if node.joint:
             attribute = doc.add_object("NodeAttribute", node.name, model.subtype, cls="NodeAttribute", children=[
                 FBXNode("TypeFlags", [Prop("S", "Skeleton")]),
@@ -118,7 +121,7 @@ def document_from_scene(
         entries = [(mesh_model, mesh.skin.geom_bind)]
         entries += [(models[joint], bind_world[j]) for j, joint in enumerate(mesh.skin.joints)]
         write_bind_pose(doc, mesh.name, entries)
-    write_animations(doc, scene, models, shape_channels)
+    write_animations(doc, scene, models, shape_channels, attributes)
     return doc
 
 

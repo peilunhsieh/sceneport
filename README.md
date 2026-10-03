@@ -60,6 +60,8 @@ times = clip.frame_times()               # one per frame at clip.fps
 clip.skinned_vertices(scene, mesh, times)  # (F, N, 3)
 clip.world_matrices(scene, times)        # {node: (F, 4, 4)}
 clip.vertices(mesh, times)               # (F, N, 3) in mesh space, incl. per-vertex animation (point_samples)
+clip.camera_at(cam_node, times)          # [Camera] per time; channels like Channel(cam_node, "camera:focal_length", 0, ...)
+clip.light_at(light_node, times)         # [Light] per time; e.g. "light:intensity", "light:color" (components 0-2)
 
 # Materials (USD and FBX): generic shading node graphs
 node.materials                           # the node's material slots

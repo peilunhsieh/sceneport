@@ -1,11 +1,13 @@
 """Keyframe animation: clips of channels, each animating one scalar.
 
-A Channel animates one component of a node transform property, or one blend
-shape weight. Node properties:
+A Channel animates one component of a node transform property, of a node's
+camera or light setting, or one blend shape weight. Node properties:
 
     "translation" (x, y, z)      "scale" (x, y, z)
     "rotation" (x, y, z)         Euler degrees in the node's rotation order (FBX, USD xformOps)
     "orientation" (w, x, y, z)   unit quaternion replacing the Euler rotation (UsdSkel, Blender bones)
+    "camera:<field>"             a numeric Camera field, e.g. "camera:focal_length" (see CAMERA_PROPERTIES)
+    "light:<field>"              a numeric Light field, e.g. "light:intensity", "light:color" (x3)
 
 Keys hold an interpolation mode for the segment that starts at them: "constant",
 "linear" or "cubic" (Hermite with automatic, Catmull-Rom style tangents). Before
@@ -26,10 +28,28 @@ import numpy as np
 from numpy.typing import ArrayLike, NDArray
 
 if TYPE_CHECKING:
+    from .camera import Camera
+    from .light import Light
     from .types import Mesh, Node, Scene, Skin
 
 INTERPOLATIONS = ("constant", "linear", "cubic")
 NODE_PROPERTIES = {"translation": 3, "rotation": 3, "scale": 3, "orientation": 4}
+# Animatable camera and light fields (in the units of scene/camera.py and scene/light.py) -> component count.
+CAMERA_PROPERTIES = {
+    "focal_length": 1, "horizontal_aperture": 1, "vertical_aperture": 1, "horizontal_aperture_offset": 1,
+    "vertical_aperture_offset": 1, "near": 1, "far": 1, "focus_distance": 1, "f_stop": 1,
+}  # fmt: skip
+LIGHT_PROPERTIES = {
+    "intensity": 1, "exposure": 1, "color": 3, "temperature": 1, "diffuse": 1, "specular": 1, "radius": 1,
+    "width": 1, "height": 1, "length": 1, "angle": 1, "cone_angle": 1, "cone_softness": 1, "shadow_color": 3,
+}  # fmt: skip
+ATTRIBUTE_PROPERTIES = {"camera": CAMERA_PROPERTIES, "light": LIGHT_PROPERTIES}
+
+
+def attribute_property(prop: str) -> tuple[str, str] | None:
+    """("camera" | "light", field) for a "camera:<field>" / "light:<field>" channel property, else None."""
+    kind, sep, name = prop.partition(":")
+    return (kind, name) if sep and kind in ATTRIBUTE_PROPERTIES else None
 
 
 @dataclass(eq=False)
@@ -37,7 +57,8 @@ class Channel:
     """Keys (`times` in seconds, `values`) for one scalar of a Node property or a Mesh blend shape.
 
     `target` is a Node (with `property` in NODE_PROPERTIES and `component` the axis or
-    quaternion component) or a Mesh (with `property` a blend shape name, component 0).
+    quaternion component, or "camera:<field>" / "light:<field>" for its camera or
+    light) or a Mesh (with `property` a blend shape name, component 0).
     """
 
     target: Union[Node, Mesh]
@@ -56,7 +77,17 @@ class Channel:
 
     @property
     def is_blend_shape(self) -> bool:
-        return self.property not in NODE_PROPERTIES
+        return self.property not in NODE_PROPERTIES and attribute_property(self.property) is None
+
+    @property
+    def is_transform(self) -> bool:
+        """A node transform channel (translation, rotation, scale, orientation)."""
+        return self.property in NODE_PROPERTIES
+
+    @property
+    def attribute(self) -> tuple[str, str] | None:
+        """("camera" | "light", field) for a camera or light channel, else None."""
+        return attribute_property(self.property)
 
     def validate(self) -> None:
         label = f"channel {self.property}[{self.component}]"
@@ -67,6 +98,13 @@ class Channel:
         if not set(self.interpolation) <= set(INTERPOLATIONS):
             raise ValueError(f"{label}: interpolation must be one of {INTERPOLATIONS}")
         size = NODE_PROPERTIES.get(self.property, 1)
+        if self.attribute is not None:
+            kind, name = self.attribute
+            if name not in ATTRIBUTE_PROPERTIES[kind]:
+                raise ValueError(f"{label}: {kind} has no animatable field {name!r}; see {kind.upper()}_PROPERTIES")
+            if getattr(self.target, kind, None) is None:
+                raise ValueError(f"{label}: the target node has no {kind}")
+            size = ATTRIBUTE_PROPERTIES[kind][name]
         if not 0 <= self.component < size:
             raise ValueError(f"{label}: component must be in [0, {size})")
 
@@ -169,7 +207,7 @@ class Animation:
         times = np.atleast_1d(np.asarray(times, dtype=np.float64))
         out: dict = {}
         for channel in self.channels:
-            if channel.is_blend_shape:
+            if not channel.is_transform:
                 continue
             node = channel.target
             props = out.setdefault(node, {})
@@ -209,6 +247,41 @@ class Animation:
             if channel.target is mesh and channel.property in index:
                 weights[:, index[channel.property]] = channel.evaluate(times)
         return weights
+
+    def attribute_values(self, node: Node, kind: str, times: ArrayLike) -> dict[str, NDArray[np.float64]]:
+        """Every animatable field of the node's camera or light (`kind`) at `times`: {field: (F,) or (F, 3)}.
+
+        Unanimated fields keep the stored value (NaN where it is None, e.g. an unset focus distance)."""
+        times = np.atleast_1d(np.asarray(times, dtype=np.float64))
+        owner = getattr(node, kind)
+        out = {}
+        for name, size in ATTRIBUTE_PROPERTIES[kind].items():
+            rest = getattr(owner, name)
+            rest = np.full(size, np.nan) if rest is None else np.asarray(rest, dtype=np.float64).reshape(size)
+            values = np.tile(rest, (len(times), 1))
+            for channel in self.channels:
+                if channel.target is node and channel.property == f"{kind}:{name}":
+                    values[:, channel.component] = channel.evaluate(times)
+            out[name] = values[:, 0] if size == 1 else values
+        return out
+
+    def camera_at(self, node: Node, times: ArrayLike) -> list[Camera]:
+        """The node's camera at each of `times`, with animated fields evaluated."""
+        return self._attribute_copies(node, "camera", times)
+
+    def light_at(self, node: Node, times: ArrayLike) -> list[Light]:
+        """The node's light at each of `times`, with animated fields evaluated."""
+        return self._attribute_copies(node, "light", times)
+
+    def _attribute_copies(self, node: Node, kind: str, times: ArrayLike) -> list:
+        import dataclasses
+
+        values = self.attribute_values(node, kind, times)
+        animated = {c.property.partition(":")[2] for c in self.channels if c.target is node and c.attribute and c.attribute[0] == kind}
+        owner = getattr(node, kind)
+        frames = len(np.atleast_1d(times))
+        return [dataclasses.replace(owner, **{n: (float(values[n][f]) if values[n].ndim == 1 else values[n][f].copy())
+                                              for n in animated}) for f in range(frames)]  # fmt: skip
 
     def points(self, mesh: Mesh, times: ArrayLike) -> NDArray[np.float64] | None:
         """(F, N, 3) animated rest positions of `mesh` at `times`, or None if the clip has no point samples for it."""

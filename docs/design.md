@@ -341,7 +341,7 @@ future changes can keep them consistent (or revisit them deliberately).
   area sizes, cylinders, colour temperature and diffuse / specular / normalize
   are dropped with a warning. (Blender's FBX importer reads point, sun and spot
   only: area lights arrive as point lights.)
-- Light and camera properties aren't animatable yet (their nodes are).
+- Light and camera settings are animatable: see Animation.
 
 ## Animation
 
@@ -382,6 +382,29 @@ future changes can keep them consistent (or revisit them deliberately).
 - **Time codes** are doubles: seconds × fps, snapped to whole frames when only
   floating-point noise is off, so FBX keys on frames land on integer codes.
 - On load, USD joint keys that never leave the rest value are not turned into channels.
+- **Camera and light settings** animate through channels whose property is
+  `"camera:<field>"` or `"light:<field>"` (target = the node; e.g.
+  `"camera:focal_length"`, `"light:color"` with components 0-2). Fields are
+  the dataclass fields, in the same units (`ATTRIBUTE_PROPERTIES`); validation
+  needs the node to carry a camera / light. `Animation.attribute_values`,
+  `camera_at` and `light_at` evaluate them (unanimated fields keep the stored
+  value). Reframing a camera / light node (FBX turns, the DomeLight_1 pole)
+  bakes its transform but keeps these channels.
+- USD writes them as attribute time samples, one per frame, for the first clip
+  only (later clips warn), in USD's units (lens in tenths of a unit,
+  `clippingRange` from near / far, a temperature turns on
+  `enableColorTemperature`); attributes with more than one sample are read back.
+- FBX writes them as AnimationCurveNodes on the camera / light NodeAttribute,
+  baked per frame because one FBX property can combine several fields:
+  FocalLength, FilmWidth/Height and offsets (inches), Near/FarPlane,
+  FocusDistance; light Intensity (intensity and exposure, Blender's watt
+  conventions), Color, ShadowColor, and spot OuterAngle / InnerAngle (cone
+  angle and softness). Other fields (f-stop, sizes, temperature, ...) warn.
+- Blender (5.2) imports only FBX FocalLength and FocusDistance curves and no
+  light animation from FBX or USD. Its FBX exporter writes animated
+  FocusDistance in mm (x1000) while the static property is in scene units, and
+  its importer divides curves by 1000; sceneport writes scene units in both, so
+  Blender reads an animated focus distance from sceneport's FBX 1000x too small.
 - **Per-vertex animation** (point caches): a clip's `point_samples` hold
   time-sampled vertex positions per mesh (`PointSamples`, mesh space; linear
   between samples, held outside), which replace the rest positions before blend

@@ -17,6 +17,23 @@ from .binary.node import FBXNode, Prop
 from .document import FBXDocument, FBXObject, Properties70, Property
 
 MM_PER_INCH = 25.4
+# Animatable Camera field -> (FBX property, factor from sceneport's value to FBX's). f_stop has no FBX property.
+ANIMATED_PROPERTIES = {
+    "focal_length": ("FocalLength", 1.0), "horizontal_aperture": ("FilmWidth", 1 / MM_PER_INCH),
+    "vertical_aperture": ("FilmHeight", 1 / MM_PER_INCH), "horizontal_aperture_offset": ("FilmOffsetX", 1 / MM_PER_INCH),
+    "vertical_aperture_offset": ("FilmOffsetY", 1 / MM_PER_INCH), "near": ("NearPlane", 1.0), "far": ("FarPlane", 1.0),
+    "focus_distance": ("FocusDistance", 1.0),
+}  # fmt: skip
+
+
+def fbx_values(fields: set[str], values: dict) -> dict[str, "np.ndarray"]:
+    """FBX property curves ({property: (F,) values}) for the animated camera `fields`, from attribute_values()."""
+    return {ANIMATED_PROPERTIES[f][0]: values[f] * ANIMATED_PROPERTIES[f][1] for f in fields if f in ANIMATED_PROPERTIES}
+
+
+def from_fbx_curve(prop: str) -> tuple[str, float] | None:
+    """(camera field, factor from FBX's value to sceneport's) for an animated FBX camera property."""
+    return next(((f, 1 / scale) for f, (p, scale) in ANIMATED_PROPERTIES.items() if p == prop), None)
 
 
 def read_camera(doc: FBXDocument, model: FBXObject) -> Camera | None:

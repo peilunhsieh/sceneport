@@ -275,6 +275,8 @@ class _Writer:
         for clip in scene.animations[1:]:
             if clip.point_samples:
                 warnings.warn(f"clip {clip.name!r}: USD holds per-vertex animation for the first clip only; not written")
+            if any(c.attribute for c in clip.channels):
+                warnings.warn(f"clip {clip.name!r}: USD holds camera / light animation for the first clip only; not written")
         self._plan()
 
     # planning
@@ -391,6 +393,9 @@ class _Writer:
             _write_camera(UsdGeom.Camera(xform.GetPrim()), node.camera, self.scene.meters_per_unit)
         elif prim_type is light_schema:
             _write_light(xform.GetPrim(), node.light, self.directory)
+        if self.active is not None and prim_type in (UsdGeom.Camera, light_schema):
+            kind = "camera" if prim_type is UsdGeom.Camera else "light"
+            _write_attribute_samples(xform.GetPrim(), node, kind, self.active, self.active_times, self.fps, self.scene.meters_per_unit)
         if joint is not None:  # attachment of a joint: start at the joint's rest pose
             token, matrix = joint
             xform.AddTransformOp(precision=_DOUBLE, opSuffix=JOINT_OP).Set(Gf.Matrix4d(matrix.T.tolist()))
@@ -561,7 +566,7 @@ class _Writer:
         joints = set(plan.joints)
         clips = [
             clip for clip in self.scene.animations
-            if any(c.target in joints if not c.is_blend_shape else (id(c.target), c.property) in plan.shape_targets
+            if any(c.target in joints and c.is_transform if not c.is_blend_shape else (id(c.target), c.property) in plan.shape_targets
                    for c in clip.channels)
         ]  # fmt: skip
         source = None
@@ -764,6 +769,83 @@ def _asset_path(asset: AssetPath, node: ShaderNode | None, directory: Path | Non
     content = node.extras.get("fbx", {}).get("content") if node is not None else None
     fallback = f"{Tf.MakeValidIdentifier(node.path)}.png" if node is not None else "texture.png"
     return texture_path(asset, directory, content=content, fallback_name=fallback, drop_missing=drop_missing)
+
+
+# Animatable camera / light field -> (USD attribute, scale from sceneport's units: "lens" = mm -> tenths of a unit).
+CAMERA_ATTRIBUTES = {
+    "focal_length": ("focalLength", "lens"), "horizontal_aperture": ("horizontalAperture", "lens"),
+    "vertical_aperture": ("verticalAperture", "lens"), "horizontal_aperture_offset": ("horizontalApertureOffset", "lens"),
+    "vertical_aperture_offset": ("verticalApertureOffset", "lens"), "focus_distance": ("focusDistance", 1.0),
+    "f_stop": ("fStop", 1.0),
+}  # fmt: skip  (near / far share clippingRange)
+LIGHT_ATTRIBUTES = {
+    "intensity": "inputs:intensity", "exposure": "inputs:exposure", "color": "inputs:color",
+    "temperature": "inputs:colorTemperature", "diffuse": "inputs:diffuse", "specular": "inputs:specular",
+    "radius": "inputs:radius", "width": "inputs:width", "height": "inputs:height", "length": "inputs:length",
+    "angle": "inputs:angle", "cone_angle": "inputs:shaping:cone:angle", "cone_softness": "inputs:shaping:cone:softness",
+    "shadow_color": "inputs:shadow:color",
+}  # fmt: skip
+
+
+def _write_attribute_samples(
+    prim: Usd.Prim, node: Node, kind: str, clip: Animation, times: NDArray, fps: float, meters_per_unit: float
+) -> None:
+    """Time samples (one per frame, like other USD animation) for the clip's camera / light channels on `node`."""
+    fields = {c.attribute[1] for c in clip.channels if c.target is node and c.attribute and c.attribute[0] == kind}
+    if not fields:
+        return
+    values = clip.attribute_values(node, kind, times)
+    codes = [_time_code(t, fps) for t in times]
+    mm = _lens_unit_mm(meters_per_unit)
+    if kind == "camera" and fields & {"near", "far"}:
+        attr = UsdGeom.Camera(prim).GetClippingRangeAttr()
+        for f, code in enumerate(codes):
+            attr.Set(Gf.Vec2f(float(values["near"][f]), float(values["far"][f])), code)
+    for name in sorted(fields - {"near", "far"}):
+        if kind == "camera":
+            attr_name, scale = CAMERA_ATTRIBUTES[name]
+            scale = 1.0 / mm if scale == "lens" else scale
+        else:
+            attr_name, scale = LIGHT_ATTRIBUTES[name], 1.0
+            if name == "temperature":
+                UsdLux.LightAPI(prim).CreateEnableColorTemperatureAttr(True)
+        attr = prim.GetAttribute(attr_name)
+        if not attr:
+            warnings.warn(f"{node.name!r}: its {kind} has no {attr_name} in USD; the {name} animation is not written")
+            continue
+        for f, code in enumerate(codes):
+            value = values[name][f]
+            attr.Set(Gf.Vec3f(*(float(v) for v in value)) if np.ndim(value) else float(value * scale), code)
+
+
+def _read_attribute_channels(prim: Usd.Prim, node: Node, kind: str, fps: float, meters_per_unit: float) -> list[Channel]:
+    """Channels for the camera / light attributes of `prim` that are time-sampled."""
+    channels = []
+
+    def sampled(attr):
+        return [] if not attr or attr.GetNumTimeSamples() < 2 else attr.GetTimeSamples()
+
+    if kind == "camera":
+        mm = _lens_unit_mm(meters_per_unit)
+        codes = sampled(UsdGeom.Camera(prim).GetClippingRangeAttr())
+        if codes:
+            ranges = np.array([UsdGeom.Camera(prim).GetClippingRangeAttr().Get(c) for c in codes], dtype=np.float64)
+            channels += [Channel(node, f"camera:{name}", 0, np.array(codes) / fps, ranges[:, i]) for i, name in enumerate(("near", "far"))]
+        table = {name: (attr, mm if scale == "lens" else scale) for name, (attr, scale) in CAMERA_ATTRIBUTES.items()}
+    else:
+        table = {name: (attr, 1.0) for name, attr in LIGHT_ATTRIBUTES.items()}
+    for name, (attr_name, scale) in table.items():
+        attr = prim.GetAttribute(attr_name)
+        codes = sampled(attr)
+        if not codes:
+            continue
+        data = np.array([attr.Get(c) for c in codes], dtype=np.float64)
+        times = np.array(codes) / fps
+        if data.ndim == 2:  # colors
+            channels += [Channel(node, f"{kind}:{name}", i, times, data[:, i]) for i in range(data.shape[1])]
+        else:
+            channels.append(Channel(node, f"{kind}:{name}", 0, times, data * scale))
+    return channels
 
 
 def _lens_unit_mm(meters_per_unit: float) -> float:
@@ -1101,10 +1183,12 @@ class _Reader:
         node = Node(_display_name(prim), _read_transform(UsdGeom.Xformable(prim)))
         if prim.IsA(UsdGeom.Camera):
             node.camera = _read_camera(prim, self.meters_per_unit)
+            self.node_channels += _read_attribute_channels(prim, node, "camera", self.fps, self.meters_per_unit)
         elif (kind := next((name for schema, name in READ_LIGHT_SCHEMAS if prim.IsA(schema)), None)) is not None:
             node.light, pole_z = _read_light(prim, kind)
             if pole_z:
                 self.z_pole_domes.append(node)
+            self.node_channels += _read_attribute_channels(prim, node, "light", self.fps, self.meters_per_unit)
         elif prim.HasAPI(UsdLux.LightAPI) or prim.IsA(UsdLux.BoundableLightBase) or prim.IsA(UsdLux.NonboundableLightBase):
             warnings.warn(f"{prim.GetPath()}: {prim.GetTypeName() or 'this'} light isn't supported; read as a plain node")
         siblings.append(node)
