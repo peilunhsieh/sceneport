@@ -68,15 +68,25 @@ def test_write_mesh_and_shape_keys(blender, tmp_path):
                                np.array([[0, 0, 0]] * 4 + [[0, 2, 0]]) @ to_blender_mesh.T, atol=1e-6)
 
 
-def test_slider_range_option_and_limit(blender, tmp_path):
-    mesh = Mesh("tri", [[0, 0, 0], [1, 0, 0], [0, 1, 0]], [3], [0, 1, 2],
-                blend_shapes=[BlendShape("a", np.ones((3, 3))), BlendShape("big", np.ones((3, 3)), weight=12.0)])  # fmt: skip
+def test_shape_ranges_and_limit(blender, tmp_path):
+    mesh = Mesh("tri", [[0, 0, 0], [1, 0, 0], [0, 1, 0]], [3], [0, 1, 2], blend_shapes=[
+        BlendShape("a", np.ones((3, 3)), range=(-3, 3)),
+        BlendShape("narrow", np.ones((3, 3)), weight=0.2, range=(0.1, 0.5)),  # kept as given: no rounding
+        BlendShape("big", np.ones((3, 3)), weight=12.0),
+    ])  # fmt: skip
     scene = Scene(nodes=[Node("Tri", mesh=mesh)])
     with pytest.warns(UserWarning, match="beyond Blender's -10..10"):
-        sceneport.save(scene, tmp_path / "tri.blend", blender=blender, slider_range=(-3, 3))
+        sceneport.save(scene, tmp_path / "tri.blend", blender=blender)
     keys = {k["name"]: k for k in objects(tmp_path / "tri.blend")["Tri"]["shape_keys"]}
     assert (keys["a"]["slider_min"], keys["a"]["slider_max"]) == (-3.0, 3.0)
-    assert (keys["big"]["slider_max"], keys["big"]["value"]) == (10.0, 10.0)
+    assert (keys["narrow"]["slider_min"], keys["narrow"]["slider_max"]) == pytest.approx((0.1, 0.5))
+    assert (keys["big"]["slider_min"], keys["big"]["slider_max"], keys["big"]["value"]) == (0.0, 10.0, 10.0)
+
+
+def test_blend_shape_range_validation():
+    assert BlendShape("s", np.zeros((1, 3))).range == (0.0, 1.0)
+    with pytest.raises(ValueError, match="min < max"):
+        BlendShape("s", np.zeros((1, 3)), range=(1, 1))
 
 
 def test_reading_blend_isnt_supported_yet(tmp_path):

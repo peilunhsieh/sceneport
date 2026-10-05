@@ -2,9 +2,9 @@
 
 So far: the node hierarchy (empties and mesh objects with their transforms),
 meshes (points, faces, custom normals, UV maps) and blend shapes as shape keys.
-The scene is first moved to Blender's Z-up meters (compat.prepare). Shape key
-slider ranges are widened to hold every weight the scene uses (Blender's default
-0..1 would clamp e.g. negative identity weights). Skins, materials, cameras,
+The scene is first moved to Blender's Z-up meters (compat.prepare). A shape key's
+slider range is its BlendShape.range, widened to whole numbers where the shape's
+default or animated weights fall outside it (Blender clamps values to the slider). Skins, materials, cameras,
 lights and animation aren't written yet: they're skipped with a warning (joints
 become empties).
 """
@@ -25,19 +25,17 @@ from .compat import prepare
 SLIDER_LIMIT = 10.0  # Blender's widest shape key slider range is -10..10
 
 
-def write_blend(scene: Scene, path: str, *, slider_range: tuple[float, float] | None = None) -> None:
+def write_blend(scene: Scene, path: str) -> None:
     """Replace Blender's current data with `scene` and save it to `path`."""
     bpy.ops.wm.read_factory_settings(use_empty=True)
-    scene_to_blender(scene, slider_range=slider_range)
+    scene_to_blender(scene)
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     bpy.ops.wm.save_as_mainfile(filepath=str(Path(path).resolve()), check_existing=False)
 
 
-def scene_to_blender(
-    scene: Scene, *, collection=None, slider_range: tuple[float, float] | None = None
-) -> dict[Node, bpy.types.Object]:
+def scene_to_blender(scene: Scene, *, collection=None) -> dict[Node, bpy.types.Object]:
     """Create objects for `scene` in `collection` (default: the current scene's) and return them by
-    (prepared copy's) node. `slider_range` widens every shape key slider to at least this range."""
+    (prepared copy's) node."""
     _warn_unsupported(scene)
     scene = prepare(scene)
     collection = collection or bpy.context.scene.collection
@@ -55,7 +53,7 @@ def scene_to_blender(
         obj = bpy.data.objects.new(node.name, data)
         collection.objects.link(obj)
         if data is not None and first and node.mesh.blend_shapes:
-            _shape_keys(obj, node.mesh, weights, slider_range)
+            _shape_keys(obj, node.mesh, weights)
         t = node.transform
         obj.rotation_mode = _axes(t.rotation_order)  # Blender's Euler modes use the same names: "XYZ" turns about X first
         obj.location = t.translation
@@ -121,7 +119,7 @@ def _shape_weights(scene: Scene) -> dict[tuple[int, str], list[float]]:
     return out
 
 
-def _shape_keys(obj, mesh: Mesh, weights: dict, slider_range: tuple[float, float] | None) -> None:
+def _shape_keys(obj, mesh: Mesh, weights: dict) -> None:
     obj.shape_key_add(name="Basis", from_mix=False)
     base = mesh.vertices.astype(np.float64)
     clamped = []
@@ -133,8 +131,10 @@ def _shape_keys(obj, mesh: Mesh, weights: dict, slider_range: tuple[float, float
         else:
             coords[shape.indices] += shape.offsets
         key.data.foreach_set("co", coords.astype(np.float32).ravel())
-        used = weights[(id(mesh), shape.name)] + list(slider_range or ())
-        low, high = math.floor(min(0.0, *used)), math.ceil(max(1.0, *used))
+        used = weights[(id(mesh), shape.name)]
+        low, high = shape.range
+        low = low if min(used) >= low else math.floor(min(used))
+        high = high if max(used) <= high else math.ceil(max(used))
         if low < -SLIDER_LIMIT or high > SLIDER_LIMIT:
             clamped.append(shape.name)
         key.slider_min = max(low, -SLIDER_LIMIT)

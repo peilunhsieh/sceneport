@@ -125,6 +125,9 @@ future changes can keep them consistent (or revisit them deliberately).
   and **in-betweens**. Weights interpolate piecewise-linearly through the
   in-betweens and extrapolate beyond [0, 1], matching FBX and UsdSkel.
   In-betweens exist because FBX (Maya) and USD support them; Blender and glTF do not.
+- `range` (default (0, 1)) is the span of weights a shape is meant for, a hint
+  for editors: only .blend stores it (the shape key slider range). Weights
+  outside it still apply.
 - **FBX export splits in-betweens by default** (`split_inbetweens=False` keeps
   them): Blender's FBX importer stops with an error on them. Weights
   interpolate linearly through the in-betweens, so a shape equals a sum of
@@ -451,10 +454,11 @@ future changes can keep them consistent (or revisit them deliberately).
 - Meshes are built with `foreach_set` (points, corners, faces), then validated;
   normals become custom normals on smooth faces (without normals, faces stay
   flat, Blender's default), UV maps per corner.
-- Blend shapes become shape keys relative to a "Basis" key. Each slider range is
-  widened to whole numbers holding the shape's default weight and animated
-  weights (and `slider_range`), within Blender's -10..10: Blender's default
-  0..1 clamps weights, e.g. GNM identity weights of -4. Blender computes shape
+- Blend shapes become shape keys relative to a "Basis" key. The slider range is
+  `BlendShape.range` (default 0..1; a hint for editors that no other format
+  stores), widened to whole numbers where the shape's default or animated
+  weights fall outside it, within Blender's -10..10: Blender clamps values to
+  the slider, e.g. GNM identity weights of -4 would become 0. Blender computes shape
   key normals itself, so normal offsets are dropped.
 - Joints, skins, materials, cameras, lights and animation aren't written yet
   (warned; joints are empties).

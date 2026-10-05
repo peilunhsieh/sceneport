@@ -37,10 +37,10 @@ def ping(payload: dict | None) -> dict:
 
 
 def write_blend(payload: dict) -> None:
-    """Save payload["scene"] as the .blend payload["path"]; payload["options"] go to to_blend.write_blend."""
+    """Save payload["scene"] as the .blend payload["path"]."""
     from .to_blend import write_blend
 
-    write_blend(payload["scene"], payload["path"], **payload.get("options", {}))
+    write_blend(payload["scene"], payload["path"])
 
 
 def inspect_blend(payload: dict) -> list[dict]:

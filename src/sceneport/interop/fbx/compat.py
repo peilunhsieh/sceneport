@@ -98,7 +98,8 @@ def _split_inbetweens(scene: Scene) -> Scene:
                         name += "_"
                     taken.add(name)
                 names.append(name)
-                shapes.append(BlendShape(name, offsets, indices=shape.indices, normal_offsets=normals, weight=float(default)))
+                shapes.append(BlendShape(name, offsets, indices=shape.indices, normal_offsets=normals, weight=float(default),
+                                          range=shape.range))
             plan[shape.name] = (names, key_weights)
         meshes[id(mesh)] = dataclasses.replace(mesh, blend_shapes=shapes)
         plans[id(mesh)] = plan

@@ -70,6 +70,9 @@ class BlendShape:
     `indices` is None. At weight w the offsets are interpolated linearly through
     (0, zero), the in-betweens, and (1, offsets); weights outside that range
     extrapolate the nearest segment.
+
+    `range` is the span of weights the shape is meant to be used over, a hint for
+    editors (Blender's shape key slider range); weights outside it still apply.
     """
 
     name: str
@@ -78,10 +81,15 @@ class BlendShape:
     normal_offsets: NDArray[np.float64] | None = None  # (K, 3)
     weight: float = 0.0  # default weight, 1.0 = fully applied
     inbetweens: list[Inbetween] = field(default_factory=list)
+    range: tuple[float, float] = (0.0, 1.0)  # (min, max) weight; see the class docstring
 
     def __post_init__(self):
         self.offsets = _vec3_array(self.offsets)
         self.normal_offsets = _vec3_array(self.normal_offsets)
+        low, high = (float(v) for v in self.range)
+        if not low < high:
+            raise ValueError(f"blend shape {self.name!r}: range must be (min, max) with min < max, got {self.range}")
+        self.range = (low, high)
         if self.indices is not None:
             self.indices = np.asarray(self.indices, dtype=np.int32)
 

@@ -19,18 +19,16 @@ def save(
     path: str | os.PathLike,
     *,
     blender: Blender | str | os.PathLike | None = None,
-    slider_range: tuple[float, float] | None = None,
     timeout: float | None = None,
 ) -> None:
     """Write `scene` as a .blend file with an installed Blender (see find_blender for `blender`).
 
-    The data is converted to Blender's Z-up meters. Shape key sliders are widened to hold every weight
-    the scene uses, and at least `slider_range` when given (e.g. (-3, 3) to edit weights by hand).
+    The data is converted to Blender's Z-up meters. Each shape key's slider range is its blend shape's
+    `range`, widened where the shape's default or animated weights fall outside it.
     So far meshes and blend shapes are written; skins, materials, cameras, lights and animation are
     skipped with a warning.
     """
-    options = {} if slider_range is None else {"slider_range": tuple(slider_range)}
-    payload = {"scene": scene, "path": str(Path(path).resolve()), "options": options}
+    payload = {"scene": scene, "path": str(Path(path).resolve())}
     run_in_blender("write_blend", payload, blender=blender, timeout=timeout)
 
 

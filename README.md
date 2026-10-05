@@ -131,8 +131,7 @@ background; nothing is installed into Blender. Blender is found from
 `blender` on PATH, or the newest one in the usual install locations.
 
 ```python
-sceneport.save(scene, "face.blend")                      # Z-up meters, as Blender's own data
-sceneport.save(scene, "face.blend", slider_range=(-3, 3))  # shape key sliders at least -3..3
+sceneport.save(scene, "face.blend")   # Z-up meters, as Blender's own data
 
 from sceneport.interop.blend import find_blender, run_in_blender
 find_blender()              # Blender(path=..., version=(5, 2, 2))
@@ -141,9 +140,10 @@ run_in_blender("ping")      # {"blender": (5, 2, 2), "python": ..., "numpy": ...
 
 So far the node hierarchy (empties and mesh objects), meshes (faces, custom
 normals, UV maps) and blend shapes (shape keys) are written; skins, materials,
-cameras, lights and animation are skipped with a warning. Shape key sliders are
-widened to hold every weight the scene uses (Blender's default 0..1 would clamp
-them). Reading `.blend` files isn't supported yet.
+cameras, lights and animation are skipped with a warning. Each shape key's
+slider range is its blend shape's `range` (default 0..1, e.g. `(-3, 3)` for a
+morphable model's coefficients), widened where the shape's weights fall outside
+it, since Blender clamps weights to the slider. Reading `.blend` files isn't supported yet.
 
 ## Converting files
 
