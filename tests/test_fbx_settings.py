@@ -61,4 +61,4 @@ def test_unsupported_extension(tmp_path):
     with pytest.raises(ValueError, match="unsupported file extension '.stl'"):
         sceneport.load(tmp_path / "x.stl")
     with pytest.raises(ValueError, match="unsupported"):
-        sceneport.save(Scene(), tmp_path / "x.blend")
+        sceneport.save(Scene(), tmp_path / "x.max")

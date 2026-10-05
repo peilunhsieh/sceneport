@@ -437,4 +437,24 @@ future changes can keep them consistent (or revisit them deliberately).
   response (a crash) raises with the end of Blender's output. Pickles are safe
   here: both sides run the same sceneport source and the files never leave the
   private job folder. A run costs about a second.
-- `bridge.py` is the only module that imports bpy.
+- `bridge.py` and `to_blend.py` are the only modules that import bpy.
+- **Writing** (`to_blend.py`, after `compat.prepare`): the scene is moved to
+  Blender's axes and units, Z up, -Y front, meters (`reframe.change_basis`), so
+  the data itself is Z-up instead of root objects carrying a 90 degree turn (what
+  Blender's FBX / USD importers do). The change M = s * C (C a signed axis
+  permutation) conjugates every local matrix, so plain transforms stay plain (the
+  Euler order permuted, e.g. Y-up ZXY is Z-up YXZ) and their channels map
+  one-to-one with unchanged keys; pivots / pre / post rotations are baked.
+  Cameras and lights are turned back to look down their -Z; a mirroring change
+  reverses face winding. In-betweens are split (as for FBX) and geometric
+  transforms baked into (copies of) the meshes.
+- Meshes are built with `foreach_set` (points, corners, faces), then validated;
+  normals become custom normals on smooth faces (without normals, faces stay
+  flat, Blender's default), UV maps per corner.
+- Blend shapes become shape keys relative to a "Basis" key. Each slider range is
+  widened to whole numbers holding the shape's default weight and animated
+  weights (and `slider_range`), within Blender's -10..10: Blender's default
+  0..1 clamps weights, e.g. GNM identity weights of -4. Blender computes shape
+  key normals itself, so normal offsets are dropped.
+- Joints, skins, materials, cameras, lights and animation aren't written yet
+  (warned; joints are empties).

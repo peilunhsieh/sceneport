@@ -36,7 +36,53 @@ def ping(payload: dict | None) -> dict:
     }
 
 
-ACTIONS = {"ping": ping}
+def write_blend(payload: dict) -> None:
+    """Save payload["scene"] as the .blend payload["path"]; payload["options"] go to to_blend.write_blend."""
+    from .to_blend import write_blend
+
+    write_blend(payload["scene"], payload["path"], **payload.get("options", {}))
+
+
+def inspect_blend(payload: dict) -> list[dict]:
+    """What a .blend holds, as plain data (a diagnostic, used by the tests): per object its name, type,
+    parent, rotation mode and world matrix, and for meshes their points, faces, corner normals, UV maps
+    and shape keys (points, value, slider range)."""
+    import bpy
+    import numpy as np
+
+    bpy.ops.wm.open_mainfile(filepath=payload["path"], load_ui=False)
+
+    def get(collection, attr, width, dtype=np.float64):
+        out = np.empty(len(collection) * width, dtype=dtype)
+        collection.foreach_get(attr, out)
+        return out.reshape(-1, width) if width > 1 else out
+
+    out = []
+    for obj in bpy.data.objects:
+        info = {
+            "name": obj.name, "type": obj.type, "parent": obj.parent.name if obj.parent else None,
+            "rotation_mode": obj.rotation_mode, "matrix_world": np.array(obj.matrix_world),
+        }  # fmt: skip
+        if obj.type == "MESH":
+            mesh = obj.data
+            info["mesh"] = mesh.name
+            info["vertices"] = get(mesh.vertices, "co", 3)
+            info["face_vertex_counts"] = get(mesh.polygons, "loop_total", 1, np.int32)
+            info["face_vertex_indices"] = get(mesh.loops, "vertex_index", 1, np.int32)
+            info["corner_normals"] = get(mesh.corner_normals, "vector", 3)
+            info["custom_normals"] = mesh.has_custom_normals
+            info["uvs"] = {layer.name: get(layer.data, "uv", 2) for layer in mesh.uv_layers}
+            keys = mesh.shape_keys.key_blocks if mesh.shape_keys else []
+            info["shape_keys"] = [
+                {"name": k.name, "points": get(k.data, "co", 3), "value": k.value, "slider_min": k.slider_min,
+                 "slider_max": k.slider_max, "relative_key": k.relative_key.name}
+                for k in keys
+            ]  # fmt: skip
+        out.append(info)
+    return out
+
+
+ACTIONS = {"ping": ping, "write_blend": write_blend, "inspect_blend": inspect_blend}
 
 
 def main(job_dir: str) -> None:

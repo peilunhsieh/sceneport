@@ -1,8 +1,9 @@
 """Rewrite a scene without changing what it looks like: shallow copies and node reframing.
 
 Used where a format expresses the same scene differently (see fbx/compat.py, and
-USD dome lights whose image pole is Z). The input scene is never modified:
-changed parts are copies, unchanged meshes and arrays are shared.
+USD dome lights whose image pole is Z), and to move a scene to other axes and units
+(change_basis, for Blender). The input scene is never modified: changed parts are
+copies, unchanged meshes and arrays are shared.
 """
 
 from __future__ import annotations
@@ -13,9 +14,9 @@ import warnings
 import numpy as np
 from numpy.typing import NDArray
 
-from ..math import TICKS_PER_SECOND, decompose_matrix
+from ..math import ROTATION_ORDERS, TICKS_PER_SECOND, _axes, decompose_matrix
 from ..scene.animation import Animation, Channel
-from ..scene.types import Mesh, Node, Scene, Transform
+from ..scene.types import Inbetween, Mesh, Node, Primvar, Scene, Transform
 
 FLIP = -np.eye(4)
 FLIP[3, 3] = 1.0  # -I on the linear part: a point reflection
@@ -144,3 +145,183 @@ def unmirror(scene: Scene, joints: set[Node] | None = None) -> Scene:
                 "drop the animation"
             )
     return reframe(scene, {node: FLIP for node in joints}) if joints else scene
+
+
+# -- axes and units ---------------------------------------------------------------------
+
+CAMERA_DISTANCES = ("near", "far", "focus_distance")  # camera fields in scene units
+LIGHT_DISTANCES = ("radius", "width", "height", "length")  # light fields in scene units
+
+
+def axis_vector(axis: str) -> NDArray[np.float64]:
+    """The unit vector of a signed axis name such as "-Y"."""
+    v = np.zeros(3)
+    v["XYZ".index(axis[1])] = 1.0 if axis[0] == "+" else -1.0
+    return v
+
+
+def basis_matrix(scene: Scene, up: str, front: str, right: str) -> NDArray[np.float64]:
+    """The 3x3 signed permutation taking the scene's right / up / front axes to `right` / `up` / `front`."""
+    source = np.column_stack([axis_vector(a) for a in (scene.right_axis, scene.up_axis, scene.front_axis)])
+    target = np.column_stack([axis_vector(a) for a in (right, up, front)])
+    for name, axes in (("scene", source), ("target", target)):
+        if abs(np.linalg.det(axes)) != 1.0:
+            raise ValueError(f"the {name} axes don't use X, Y and Z once each")
+    return target @ source.T
+
+
+def change_basis(scene: Scene, *, up: str, front: str, right: str, meters_per_unit: float) -> Scene:
+    """`scene` expressed with other axes and units, looking the same.
+
+    With M = s * C (C the axis change, s the unit factor), every node's local matrix
+    becomes M @ local @ M^-1 and mesh points, offsets, inverse binds and camera / light
+    distances follow; the result's world matrices are M @ world @ M^-1. Since C only
+    swaps and flips axes, a plain translation / Euler / scale transform stays one (its
+    rotation order permuted) and its animation channels map one-to-one, keys unchanged;
+    nodes with pivots or pre / post rotations become plain transforms (baked per frame
+    when animated). Cameras and lights keep looking down their node's -Z (and a dome's
+    pole stays +Y): their frames are turned by C after the change. A mirroring C (one
+    that changes handedness) also reverses each face's winding.
+    """
+    c = basis_matrix(scene, up, front, right)
+    s = scene.meters_per_unit / meters_per_unit
+    if np.array_equal(c, np.eye(3)) and s == 1.0:
+        return dataclasses.replace(scene, up_axis=up, front_axis=front, right_axis=right, meters_per_unit=meters_per_unit)
+    m, m_inv = np.eye(4), np.eye(4)
+    m[:3, :3], m_inv[:3, :3] = s * c, c.T / s
+    perm = np.abs(c).argmax(axis=0)  # source axis i -> target axis perm[i]
+    sign = c[perm, np.arange(3)]
+    det = round(np.linalg.det(c))
+
+    def mapped(values: NDArray, factor: NDArray | float = 1.0) -> NDArray:
+        out = np.empty_like(values)
+        out[..., perm] = values * factor
+        return out
+
+    def order_of(transform: Transform) -> int:
+        return ROTATION_ORDERS.index("".join("XYZ"[perm["XYZ".index(a)]] for a in _axes(transform.rotation_order)))
+
+    def geometric(transform: Transform) -> tuple:
+        if np.array_equal(transform.geometric_matrix(), np.eye(4)):
+            return transform.geometric_translation, transform.geometric_rotation, transform.geometric_scale
+        return decompose_matrix(m @ transform.geometric_matrix() @ m_inv)
+
+    plain_nodes = {node for node, _ in scene.walk() if _plain(node.transform)}
+    transforms = {}
+    for node, _ in scene.walk():
+        t = node.transform
+        gt, gr, gs = geometric(t)
+        if node in plain_nodes:
+            translation, rotation, scale = mapped(t.translation, s * sign), mapped(t.rotation, sign * det), mapped(t.scale)
+        else:
+            translation, rotation, scale = decompose_matrix(m @ t.matrix() @ m_inv, order_of(t))
+        transforms[node] = Transform(
+            translation=translation, rotation=rotation, scale=scale, rotation_order=order_of(t),
+            geometric_translation=gt, geometric_rotation=gr, geometric_scale=gs,
+        )  # fmt: skip
+
+    flip = det < 0
+    meshes = {id(mesh): _mesh_in_basis(mesh, s * c, c, m, m_inv, flip) for mesh in scene.meshes}
+
+    def channels(clip: Animation) -> list[Channel]:
+        out = []
+        for channel in clip.channels:
+            node = channel.target
+            if channel.is_transform and node not in plain_nodes:
+                continue  # baked below
+            if channel.property == "orientation" and channel.component > 0:
+                axis = channel.component - 1
+                out.append(dataclasses.replace(channel, component=1 + perm[axis], values=channel.values * det * sign[axis]))
+            elif channel.property in ("translation", "rotation", "scale"):
+                factor = {"translation": s * sign, "rotation": sign * det, "scale": np.ones(3)}[channel.property]
+                out.append(dataclasses.replace(channel, component=perm[channel.component],
+                                               values=channel.values * factor[channel.component]))  # fmt: skip
+            elif channel.attribute in {("camera", f) for f in CAMERA_DISTANCES} | {("light", f) for f in LIGHT_DISTANCES}:
+                out.append(dataclasses.replace(channel, values=channel.values * s))
+            else:  # orientation w, blend shape weights, other camera / light fields
+                out.append(channel)
+        for node in {c.target for c in clip.channels if c.is_transform and c.target not in plain_nodes}:
+            times = key_times(clip, [c for c in clip.channels if c.target is node and c.is_transform])
+            local = m @ node.transform.matrix(**clip.node_values(times)[node]) @ m_inv
+            translation, rotation, scale = decompose_matrix(local, transforms[node].rotation_order)
+            rotation = np.degrees(np.unwrap(np.radians(rotation), axis=0))
+            for prop, values in (("translation", translation), ("rotation", rotation), ("scale", scale)):
+                out += [Channel(node, prop, axis, times, values[:, axis]) for axis in range(3)]
+        return out
+
+    converted = copy_scene(scene, meshes, transforms, channels)
+    for clip in converted.animations:
+        clip.point_samples = [dataclasses.replace(p, points=p.points @ (s * c).T) for p in clip.point_samples]
+    converted = dataclasses.replace(converted, up_axis=up, front_axis=front, right_axis=right, meters_per_unit=meters_per_unit)
+    for node, _ in converted.walk():
+        if node.camera is not None and s != 1.0:
+            node.camera = dataclasses.replace(node.camera, **{f: _scaled(getattr(node.camera, f), s) for f in CAMERA_DISTANCES})
+        if node.light is not None and s != 1.0:
+            node.light = dataclasses.replace(node.light, **{f: getattr(node.light, f) * s for f in LIGHT_DISTANCES})
+    c4 = np.eye(4)
+    c4[:3, :3] = c
+    frames = {node: c4 for node, _ in converted.walk() if node.camera is not None or node.light is not None}
+    if frames and not np.array_equal(c, np.eye(3)):
+        converted = reframe(converted, frames)
+    return converted
+
+
+def _plain(transform: Transform) -> bool:
+    """No pivots, offsets or pre / post rotations: just translation, Euler rotation and scale."""
+    return not any(np.any(getattr(transform, f)) for f in
+                   ("pre_rotation", "post_rotation", "rotation_pivot", "rotation_offset", "scaling_pivot", "scaling_offset"))  # fmt: skip
+
+
+def _scaled(value: float | None, s: float) -> float | None:
+    return None if value is None else value * s
+
+
+def _mesh_in_basis(mesh: Mesh, linear: NDArray, rotation: NDArray, m: NDArray, m_inv: NDArray, flip: bool) -> Mesh:
+    """`mesh` with points and offsets times `linear`, normals times `rotation`, skin matrices conjugated by
+    m, and (`flip`) each face's corners reversed so faces keep facing outward after a mirroring change."""
+
+    def points(values):
+        return None if values is None else values @ linear.T
+
+    def directions(values):
+        return None if values is None else values @ rotation.T
+
+    corners = _reversed_corners(mesh.face_vertex_counts) if flip else None
+
+    def per_corner(primvar: Primvar | None, transform=None) -> Primvar | None:
+        if primvar is None:
+            return None
+        values = primvar.values if transform is None else transform(primvar.values)
+        indices = primvar.indices
+        if corners is not None and primvar.interpolation == "faceVarying":
+            if indices is not None:
+                indices = indices[corners]
+            else:
+                values = values[corners]
+        return Primvar(values, primvar.interpolation, indices)
+
+    shapes = [
+        dataclasses.replace(shape, offsets=points(shape.offsets), normal_offsets=directions(shape.normal_offsets),
+                            inbetweens=[Inbetween(i.weight, points(i.offsets), directions(i.normal_offsets)) for i in shape.inbetweens])
+        for shape in mesh.blend_shapes
+    ]  # fmt: skip
+    skin = mesh.skin
+    if skin is not None:
+        skin = dataclasses.replace(skin, inverse_bind=m @ skin.inverse_bind @ m_inv, geom_bind=m @ skin.geom_bind @ m_inv)
+    return dataclasses.replace(
+        mesh,
+        vertices=points(mesh.vertices),
+        face_vertex_indices=mesh.face_vertex_indices if corners is None else mesh.face_vertex_indices[corners],
+        normals=per_corner(mesh.normals, directions),
+        uvs={name: per_corner(uv) for name, uv in mesh.uvs.items()},
+        blend_shapes=shapes,
+        skin=skin,
+    )
+
+
+def _reversed_corners(counts: NDArray) -> NDArray[np.int64]:
+    """Corner order that reverses every face's corners (each face keeps its first corner)."""
+    starts = np.concatenate([[0], np.cumsum(counts)[:-1]])
+    face = np.repeat(np.arange(len(counts)), counts)
+    k = np.arange(counts.sum()) - starts[face]
+    return starts[face] + np.where(k == 0, 0, counts[face] - k)

@@ -125,17 +125,25 @@ scene = sceneport.load("model.usd")  # composed stage: references, payloads, ins
 
 ### Blender
 
-`.blend` support (in progress) runs an installed Blender 5.2 or newer in the
+`.blend` files are written by an installed Blender 5.2 or newer, run in the
 background; nothing is installed into Blender. Blender is found from
 `blender=<path>` (an executable, or the `.app` on macOS), `$SCENEPORT_BLENDER`,
 `blender` on PATH, or the newest one in the usual install locations.
 
 ```python
-from sceneport.interop.blend import find_blender, run_in_blender
+sceneport.save(scene, "face.blend")                      # Z-up meters, as Blender's own data
+sceneport.save(scene, "face.blend", slider_range=(-3, 3))  # shape key sliders at least -3..3
 
+from sceneport.interop.blend import find_blender, run_in_blender
 find_blender()              # Blender(path=..., version=(5, 2, 2))
 run_in_blender("ping")      # {"blender": (5, 2, 2), "python": ..., "numpy": ...}
 ```
+
+So far the node hierarchy (empties and mesh objects), meshes (faces, custom
+normals, UV maps) and blend shapes (shape keys) are written; skins, materials,
+cameras, lights and animation are skipped with a warning. Shape key sliders are
+widened to hold every weight the scene uses (Blender's default 0..1 would clamp
+them). Reading `.blend` files isn't supported yet.
 
 ## Converting files
 
@@ -243,7 +251,7 @@ the repository.
 - [x] Phase 3 — materials / textures (USD graphs, FBX Phong, PBR interpretation)
 - [x] Phase 4 — skeleton / skinning (linear blend skinning), FBX and USD
 - [x] Phase 5 — animation (keyframes, joints/nodes/blend shape weights), FBX and USD
-- [ ] Phase 6 — `.blend` through an installed Blender: running Blender (done), reading, writing
+- [ ] Phase 6 — `.blend` through an installed Blender: running Blender, writing meshes and shape keys (done); skins, materials, cameras, lights, animation; reading
 
 ## Conventions
 

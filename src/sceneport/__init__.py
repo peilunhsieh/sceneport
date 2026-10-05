@@ -12,9 +12,9 @@ from .scene import (  # noqa: E402
 
 
 def _formats():
-    from .interop import fbx, obj, ply, usd
+    from .interop import blend, fbx, obj, ply, usd
 
-    return {".fbx": fbx, **{ext: usd for ext in usd.EXTENSIONS}, ".obj": obj, ".ply": ply}
+    return {".fbx": fbx, **{ext: usd for ext in usd.EXTENSIONS}, ".obj": obj, ".ply": ply, ".blend": blend}
 
 
 def load(path: str | os.PathLike) -> Scene:
