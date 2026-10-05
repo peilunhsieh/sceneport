@@ -413,3 +413,28 @@ future changes can keep them consistent (or revisit them deliberately).
   rest points kept as the default), with the mesh's `extent` time-sampled
   alongside: viewers cull by extent (Quick Look stops drawing a mesh whose
   points left a stale one). FBX, OBJ and PLY can't hold them and warn.
+
+## Blender (.blend)
+
+- **An installed Blender does the work**, run in the background
+  (`interop/blend/runner.py`): a .blend is Blender's memory dumped to disk, so
+  only Blender reads and writes it reliably. Not the `bpy` package from PyPI (one
+  Python version per release, 250-400 MB, GPL code in the process) and not a
+  pure-Python parser (Blender's internals change every release; modifiers and
+  drivers need Blender to evaluate). Blender 5.2 or newer only: 5.x has a single
+  animation API (slotted actions).
+- **Nothing is installed into Blender.** Each run puts a temporary folder on
+  Blender's `sys.path` holding only a link to the sceneport package (a copy
+  where symlinks aren't allowed), so sceneport runs on Blender's own Python 3.13,
+  numpy and pxr, and no host packages leak in (a venv's site-packages would bring
+  numpy built for another Python). So sceneport keeps its import-time
+  dependencies to numpy and stays compatible with Blender's Python and numpy 2.
+- **One action per run:** `Blender -b --factory-startup --python-exit-code 1
+  --python-expr <boot> -- <path dir> <job dir>` (no user preferences or add-ons).
+  `bridge.main` reads `request.pkl`, runs `bridge.ACTIONS[action]` and always
+  writes `response.pkl` with the result, the warnings raised (re-raised on the
+  host) and any traceback (raised as `BlenderError`). A run that leaves no
+  response (a crash) raises with the end of Blender's output. Pickles are safe
+  here: both sides run the same sceneport source and the files never leave the
+  private job folder. A run costs about a second.
+- `bridge.py` is the only module that imports bpy.

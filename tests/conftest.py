@@ -9,6 +9,12 @@ def pytest_addoption(parser):
         action="store_true",
         help="download missing sample files (see tests/fetch_samples.py) before running the tests",
     )
+    parser.addoption(
+        "--blender",
+        metavar="PATH",
+        help="the Blender (executable or .app) for the Blender tests; default: $SCENEPORT_BLENDER or the newest "
+        "Blender 5.2+ installed. Blender tests are skipped when none is found",
+    )
 
 
 def pytest_sessionstart(session):
@@ -31,3 +37,14 @@ def sample():
         return path
 
     return get
+
+
+@pytest.fixture(scope="session")
+def blender(request):
+    """The Blender to run Blender tests with; skips the test when none is found."""
+    from sceneport.interop.blend import BlenderError, find_blender
+
+    try:
+        return find_blender(request.config.getoption("--blender"))
+    except BlenderError as e:
+        pytest.skip(f"no Blender: {e}")

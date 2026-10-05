@@ -123,6 +123,20 @@ scene = sceneport.load("model.usd")  # composed stage: references, payloads, ins
   also get a UsdPreviewSurface network; embedded FBX textures are written to
   a `textures` folder (packaged in `.usdz`).
 
+### Blender
+
+`.blend` support (in progress) runs an installed Blender 5.2 or newer in the
+background; nothing is installed into Blender. Blender is found from
+`blender=<path>` (an executable, or the `.app` on macOS), `$SCENEPORT_BLENDER`,
+`blender` on PATH, or the newest one in the usual install locations.
+
+```python
+from sceneport.interop.blend import find_blender, run_in_blender
+
+find_blender()              # Blender(path=..., version=(5, 2, 2))
+run_in_blender("ping")      # {"blender": (5, 2, 2), "python": ..., "numpy": ...}
+```
+
 ## Converting files
 
 ```bash
@@ -211,6 +225,9 @@ uv run python tests/fetch_samples.py          # download all
 uv run python tests/fetch_samples.py NAME     # or only some
 ```
 
+Tests that run Blender use `--blender PATH`, `$SCENEPORT_BLENDER` or the newest
+Blender 5.2+ installed, and are skipped when there is none.
+
 Each sample's URL and license are listed in `tests/fetch_samples.py`. A sample
 that's already there isn't downloaded again (delete it to refresh); zip samples
 are unpacked and the zip deleted. Some samples have restrictive licenses (e.g.
@@ -226,6 +243,7 @@ the repository.
 - [x] Phase 3 — materials / textures (USD graphs, FBX Phong, PBR interpretation)
 - [x] Phase 4 — skeleton / skinning (linear blend skinning), FBX and USD
 - [x] Phase 5 — animation (keyframes, joints/nodes/blend shape weights), FBX and USD
+- [ ] Phase 6 — `.blend` through an installed Blender: running Blender (done), reading, writing
 
 ## Conventions
 
