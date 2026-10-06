@@ -92,3 +92,111 @@ def test_blend_shape_range_validation():
 def test_reading_blend_isnt_supported_yet(tmp_path):
     with pytest.raises(NotImplementedError):
         sceneport.load(tmp_path / "x.blend")
+
+
+# -- armatures and skins ---------------------------------------------------------------------
+
+
+def rig_scene() -> Scene:
+    """A Y-up centimeter rig: Rig > Root > Spine > Head (+ a Hat under Head) and a mirrored LeftArm with a
+    scaled bind, skinning a Body mesh (with a shape key) that moved after binding; posed away from the bind."""
+    head = Node("Head", Transform(translation=[0, 30, 0]), joint=True,
+                children=[Node("Hat", Transform(translation=[0, 12, 0], rotation=[0, 0, 10]))])  # fmt: skip
+    spine = Node("Spine", Transform(translation=[0, 40, 0]), joint=True, children=[head])
+    arm = Node("LeftArm", Transform(translation=[15, 30, 0], scale=[-1, 1, 1]), joint=True)
+    root = Node("Root", Transform(translation=[0, 90, 0]), joint=True, children=[spine, arm])
+    rig = Node("Rig", Transform(translation=[50, 0, 0], rotation=[0, 30, 0], scale=[2, 2, 2]), children=[root])
+    y = np.linspace(80, 170, 10)
+    vertices = np.column_stack([np.where(np.arange(10) % 2, 10.0, -10.0), y, np.zeros(10)])
+    faces = np.array([[i, i + 1, i + 3, i + 2] for i in range(0, 8, 2)]).ravel()
+    body = Mesh("body", vertices, [4] * 4, faces, blend_shapes=[BlendShape("bulge", np.tile([0, 0, 5.0], (10, 1)), weight=0.5)])
+    body_node = Node("Body", Transform(translation=[50, 0, 0], rotation=[0, 30, 0], scale=[2, 2, 2]), mesh=body)
+    scene = Scene(nodes=[rig, body_node], meters_per_unit=0.01)
+
+    joints = [root, spine, head, arm]
+    world = scene.world_matrices()
+    inverse_bind = np.stack([np.linalg.inv(world[j]) for j in joints])
+    inverse_bind[3] = np.linalg.inv(world[arm] @ np.diag([1.5, 1.5, 1.5, 1.0]))  # bound while scaled
+    weights = np.clip(1 - np.abs(y[:, None] - np.array([90, 130, 160, 120])[None, :]) / 40, 0, None)
+    weights /= weights.sum(axis=1, keepdims=True)
+    from sceneport.scene import Skin
+
+    body.skin = Skin(joints, np.tile(np.arange(4), (10, 1)), weights, inverse_bind, geom_bind=world[body_node])
+    # the current pose differs from the bind pose, and the body moved after binding
+    spine.transform.rotation = np.array([0, 0, 25.0])
+    head.transform.rotation = np.array([20, 0, 0])
+    root.transform.translation = np.array([0, 95, 5.0])
+    body_node.transform.translation = np.array([60, 0, 0])
+    return scene
+
+
+def expected_world_points(scene: Scene, node: Node) -> np.ndarray:
+    """Our deformed world-space points, in Blender's Z-up meters."""
+    mesh = node.mesh
+    if mesh.skin is not None:
+        points = mesh.skinned_vertices(mesh.skin.joint_world(scene))
+    else:
+        w = scene.world_matrices()[node]
+        points = mesh.deformed_vertices() @ w[:3, :3].T + w[:3, 3]
+    return points @ (scene.meters_per_unit * basis_matrix(scene, "+Z", "-Y", "+X")).T
+
+
+def test_write_armature_and_skin(blender, tmp_path):
+    scene = rig_scene()
+    sceneport.save(scene, tmp_path / "rig.blend", blender=blender)
+    written = objects(tmp_path / "rig.blend")
+    assert {(o["name"], o["type"], o["parent"], o["parent_bone"]) for o in written.values()} == {
+        ("Rig", "ARMATURE", None, None), ("Body", "MESH", "Rig", None), ("Hat", "EMPTY", "Rig", "Head")}  # fmt: skip
+    bones = {b["name"]: b for b in written["Rig"]["bones"]}
+    assert {n: b["parent"] for n, b in bones.items()} == {"Root": None, "Spine": "Root", "Head": "Spine", "LeftArm": "Root"}
+    assert all(b["length"] > 0 for b in bones.values())
+    assert all(np.linalg.det(b["rest"][:3, :3]) > 0 for b in bones.values())  # the mirrored arm was unmirrored
+    body = written["Body"]
+    assert body["vertex_groups"] == ["Root", "Spine", "Head", "LeftArm"]
+    assert body["modifiers"] == [("ARMATURE", "Rig")]
+    np.testing.assert_allclose(body["world_vertices"], expected_world_points(scene, scene.find("Body")), atol=1e-5)
+
+    m = np.eye(4)
+    m[:3, :3] = 0.01 * basis_matrix(scene, "+Z", "-Y", "+X")
+    hat = scene.world_matrices()[scene.find("Hat")]
+    np.testing.assert_allclose(written["Hat"]["matrix_world"], m @ hat @ np.linalg.inv(m), atol=1e-6)
+    head = scene.world_matrices()[scene.find("Head")]  # posed bone heads where our joints are
+    np.testing.assert_allclose((written["Rig"]["matrix_world"] @ bones["Head"]["pose"])[:3, 3],
+                               (m @ head)[:3, 3], atol=1e-6)  # fmt: skip
+
+
+def test_write_human_female(blender, sample, tmp_path):
+    path = sample("usdskel_examples") / "HumanFemale" / "HumanFemale.walk.usd"
+    scene = sceneport.load(path)
+    with pytest.warns(UserWarning):  # animation, materials ... aren't written yet
+        sceneport.save(scene, tmp_path / "human.blend", blender=blender)
+    written = objects(tmp_path / "human.blend")
+    armatures = [o for o in written.values() if o["type"] == "ARMATURE"]
+    assert len(armatures) == 1 and len(armatures[0]["bones"]) == 66
+    checked, seen = 0, {}
+    for node, _ in scene.walk():  # objects are created in this order; Blender renames repeats to name.001, ...
+        if node.joint:
+            continue
+        count = seen[node.name] = seen.get(node.name, -1) + 1
+        name = node.name if count == 0 else f"{node.name}.{count:03d}"
+        if node.mesh is not None and node.mesh.skin is not None:
+            got = written[name]["world_vertices"]
+            np.testing.assert_allclose(got, expected_world_points(scene, node), atol=1e-5, err_msg=node.name)
+            checked += 1
+    assert checked == 89
+
+
+def test_top_level_skeleton_gets_an_armature(blender, tmp_path):
+    """A skeleton at the top level with its mesh beside it (e.g. MHR's FBX): both go under a new armature
+    object named after the root joint, and the mesh still deforms the same."""
+    scene = rig_scene()
+    rig = scene.nodes[0]
+    scene.nodes = [*rig.children, scene.find("Body")]  # Root joint and Body at the top level
+    root = scene.nodes[0]
+    root.transform.translation = np.array([50, 95, 5.0])
+    sceneport.save(scene, tmp_path / "top.blend", blender=blender)
+    written = objects(tmp_path / "top.blend")
+    assert {(o["name"], o["type"], o["parent"]) for o in written.values()} == {
+        ("Root", "ARMATURE", None), ("Body", "MESH", "Root"), ("Hat", "EMPTY", "Root")}  # fmt: skip
+    assert written["Root"]["bones"][0]["name"] == "Root"  # the root bone keeps its name too
+    np.testing.assert_allclose(written["Body"]["world_vertices"], expected_world_points(scene, scene.find("Body")), atol=1e-5)

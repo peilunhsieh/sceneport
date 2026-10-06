@@ -45,8 +45,10 @@ def write_blend(payload: dict) -> None:
 
 def inspect_blend(payload: dict) -> list[dict]:
     """What a .blend holds, as plain data (a diagnostic, used by the tests): per object its name, type,
-    parent, rotation mode and world matrix, and for meshes their points, faces, corner normals, UV maps
-    and shape keys (points, value, slider range)."""
+    parent (and parent bone), rotation mode and world matrix; for meshes their points, faces, corner
+    normals, UV maps, shape keys (points, value, slider range), vertex groups, modifiers and evaluated
+    world-space points (shape keys and armatures applied); for armatures their bones (parent, length,
+    rest matrix and posed matrix, in armature space)."""
     import bpy
     import numpy as np
 
@@ -57,12 +59,20 @@ def inspect_blend(payload: dict) -> list[dict]:
         collection.foreach_get(attr, out)
         return out.reshape(-1, width) if width > 1 else out
 
+    depsgraph = bpy.context.evaluated_depsgraph_get()
     out = []
     for obj in bpy.data.objects:
         info = {
             "name": obj.name, "type": obj.type, "parent": obj.parent.name if obj.parent else None,
             "rotation_mode": obj.rotation_mode, "matrix_world": np.array(obj.matrix_world),
+            "parent_bone": obj.parent_bone if obj.parent_type == "BONE" else None,
         }  # fmt: skip
+        if obj.type == "ARMATURE":
+            info["bones"] = [
+                {"name": b.name, "parent": b.parent.name if b.parent else None, "length": b.length,
+                 "rest": np.array(b.matrix_local), "pose": np.array(obj.pose.bones[b.name].matrix)}
+                for b in obj.data.bones
+            ]  # fmt: skip
         if obj.type == "MESH":
             mesh = obj.data
             info["mesh"] = mesh.name
@@ -78,6 +88,13 @@ def inspect_blend(payload: dict) -> list[dict]:
                  "slider_max": k.slider_max, "relative_key": k.relative_key.name}
                 for k in keys
             ]  # fmt: skip
+            info["vertex_groups"] = [g.name for g in obj.vertex_groups]
+            info["modifiers"] = [(m.type, getattr(m, "object", None) and m.object.name) for m in obj.modifiers]
+            evaluated = obj.evaluated_get(depsgraph).to_mesh()
+            points = get(evaluated.vertices, "co", 3)
+            world = np.array(obj.matrix_world)
+            info["world_vertices"] = points @ world[:3, :3].T + world[:3, 3]
+            obj.evaluated_get(depsgraph).to_mesh_clear()
         out.append(info)
     return out
 

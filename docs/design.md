@@ -460,5 +460,31 @@ future changes can keep them consistent (or revisit them deliberately).
   weights fall outside it, within Blender's -10..10: Blender clamps values to
   the slider, e.g. GNM identity weights of -4 would become 0. Blender computes shape
   key normals itself, so normal offsets are dropped.
-- Joints, skins, materials, cameras, lights and animation aren't written yet
-  (warned; joints are empties).
+- **Armatures** (`compat.rigs`, pure numpy, then `to_blend._bones`): each tree
+  of joints is one armature, held by the joints' parent node when it's a plain
+  node (a USD Skeleton, an FBX "Armature" null), else by a new node inserted
+  there (a skeleton at the top level, e.g. MHR's FBX), named after the root
+  joint ("body_world" for MHR; the root bone keeps the name too, since Blender
+  keeps object and bone names apart) or "Armature" for several root joints. Skinned meshes
+  not under their armature are moved under it, keeping their world placement:
+  both as Blender's FBX importer does, whose convention is deformed meshes as
+  children of their armature. Blender's armature modifier deforms by P @ R^-1 (pose times
+  inverse rest, in armature space) and has no separate bind pose, so bones rest
+  in the bind pose: with A the armature's world matrix and B a joint's bind
+  world matrix (from its skin, else its current one), rest R = A^-1 @ B with
+  scale removed (edit bones can't scale), and pose P = A^-1 @ J @ B^-1 @ A @ R
+  for current world J, which is A^-1 @ J when the bind has no scale. The pose
+  bone basis is computed from the rest matrices Blender stored (pose = parent
+  pose @ parent rest^-1 @ rest @ basis). Mirrored joints are unmirrored first.
+  A bone's frame is its joint's: it points along the joint's +Y (rigs whose
+  joints point down X show sideways bones; deformation is unaffected). Bones
+  reach the child joint ahead along +Y, else the nearest child, else half
+  their parent's length.
+- **Skins** become vertex groups named after the bones (a joint listed twice
+  for a vertex has its weights added) and an Armature modifier. The modifier
+  deforms the mesh as its object places it, so a mesh whose node moved since
+  binding is re-bound first (points moved to the node's space). Nodes under a
+  joint are parented to its bone, with a parent inverse cancelling Blender's
+  offset to the bone's tail. A skin spanning several armatures deforms with the
+  first one only (warned).
+- Materials, cameras, lights and animation aren't written yet (warned).

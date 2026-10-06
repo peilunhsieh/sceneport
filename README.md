@@ -139,8 +139,10 @@ run_in_blender("ping")      # {"blender": (5, 2, 2), "python": ..., "numpy": ...
 ```
 
 So far the node hierarchy (empties and mesh objects), meshes (faces, custom
-normals, UV maps) and blend shapes (shape keys) are written; skins, materials,
-cameras, lights and animation are skipped with a warning. Each shape key's
+normals, UV maps), blend shapes (shape keys), joints (one armature per joint
+tree, bones resting in the bind pose and posed as the scene is) and skins
+(vertex groups and an Armature modifier, the mesh a child of its armature) are written; materials, cameras,
+lights and animation are skipped with a warning. Each shape key's
 slider range is its blend shape's `range` (default 0..1, e.g. `(-3, 3)` for a
 morphable model's coefficients), widened where the shape's weights fall outside
 it, since Blender clamps weights to the slider. Reading `.blend` files isn't supported yet.
@@ -251,7 +253,7 @@ the repository.
 - [x] Phase 3 — materials / textures (USD graphs, FBX Phong, PBR interpretation)
 - [x] Phase 4 — skeleton / skinning (linear blend skinning), FBX and USD
 - [x] Phase 5 — animation (keyframes, joints/nodes/blend shape weights), FBX and USD
-- [ ] Phase 6 — `.blend` through an installed Blender: running Blender, writing meshes and shape keys (done); skins, materials, cameras, lights, animation; reading
+- [ ] Phase 6 — `.blend` through an installed Blender: running Blender, writing meshes, shape keys, armatures and skins (done); materials, cameras, lights, animation; reading
 
 ## Conventions
 
