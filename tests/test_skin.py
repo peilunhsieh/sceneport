@@ -157,7 +157,7 @@ def test_usd_layout():
     assert list(skeleton.GetJointNamesAttr().Get()) == ["root", "mid", "tip.end"]
     helper = stage.GetPrimAtPath("/SkelRoot/root/helper")
     assert helper.GetCustomDataByKey("sceneport:joint") == "root/mid"
-    binding = UsdSkel.BindingAPI(stage.GetPrimAtPath("/SkelRoot/strip/Strip"))
+    binding = UsdSkel.BindingAPI(stage.GetPrimAtPath("/SkelRoot/strip/strip"))
     assert list(binding.GetJointsAttr().Get()) == ["root/mid", "root"]  # the skin's own order
     assert binding.GetJointIndicesPrimvar().GetElementSize() == 2
 
@@ -181,7 +181,7 @@ def test_usd_skinning_matches_usdskel():
     local = np.stack([by_name[name].transform.matrix() for name in skeleton.GetJointNamesAttr().Get()])
     animation.SetTransforms(Vt.Matrix4dArray.FromNumpy(np.ascontiguousarray(local.transpose(0, 2, 1))), Usd.TimeCode.Default())
     assert UsdSkel.BakeSkinning(stage.Traverse())
-    usd_mesh = UsdGeom.Mesh(stage.GetPrimAtPath("/SkelRoot/strip/Strip"))
+    usd_mesh = UsdGeom.Mesh(stage.GetPrimAtPath("/SkelRoot/strip/strip"))
     local = np.array(usd_mesh.GetPointsAttr().Get(Usd.TimeCode.EarliestTime()))  # baked points are mesh-local
     to_world = np.array(usd_mesh.ComputeLocalToWorldTransform(Usd.TimeCode.EarliestTime())).T
     baked = local @ to_world[:3, :3].T + to_world[:3, 3]

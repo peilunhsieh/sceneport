@@ -82,7 +82,7 @@ def test_mesh_prim_layout():
     xform = stage.GetPrimAtPath("/Cube_001")
     assert xform.GetTypeName() == "Xform" and xform.GetDisplayName() == "Cube.001"
     assert stage.GetDefaultPrim() == xform
-    mesh = UsdGeom.Mesh(stage.GetPrimAtPath("/Cube_001/Mixed"))
+    mesh = UsdGeom.Mesh(stage.GetPrimAtPath("/Cube_001/Cube_001"))
     assert mesh.GetSubdivisionSchemeAttr().Get() == UsdGeom.Tokens.none
     primvars = UsdGeom.PrimvarsAPI(mesh)
     assert primvars.GetPrimvar("st").HasValue()  # first UV set
@@ -105,7 +105,7 @@ def test_hierarchy_instancing_and_names():
 
     stage = stage_from_scene(scene)
     assert [p.GetName() for p in stage.GetPrimAtPath("/Root").GetChildren()] == ["A", "A_1", "__bad_name_"]
-    assert stage.GetPrimAtPath("/Root/A_1/Mixed").HasAuthoredReferences()  # shared mesh
+    assert stage.GetPrimAtPath("/Root/A_1/A").HasAuthoredReferences()  # shared mesh
 
     back = scene_from_stage(stage)
     kids = back.nodes[0].children

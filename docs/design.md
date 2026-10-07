@@ -318,6 +318,13 @@ future changes can keep them consistent (or revisit them deliberately).
   importer skips it like the `/root` of its own exports instead of adding an empty;
   likewise sceneport drops a `/root` with Blender's tag when reading a Blender export.
 - Materials go in a `_materials` Scope under the default prim.
+- A node is an Xform prim (its transform) with its mesh in a Mesh child prim
+  (the FBX geometric transform goes there; child nodes stay under the Xform),
+  like Maya's transform and shape. The Mesh prim is named after the node, and
+  the mesh's own name is its `displayName` (read back as `Mesh.name`): Blender's
+  importer merges an Xform with its only Mesh child into one object named after
+  the Mesh prim, and ignores `displayName`. E.g. MHR's `body_mesh` node with
+  mesh `mesh` imports as object `body_mesh`, not `mesh`.
 - `metersPerUnit` is read even when an old writer stored it as a float
   (Blender 2.80), which USD's typed getter rejects.
 

@@ -461,7 +461,9 @@ class _Writer:
 
         child_names: set[str] = set()
         if mesh is not None:
-            usd_mesh = self._write_mesh_prim(path.AppendChild(_prim_name(mesh.name, child_names)), mesh)
+            # Named after the node, not the mesh: Blender's importer merges an Xform with its only Mesh child
+            # into one object named after the Mesh prim. The mesh's own name is its displayName.
+            usd_mesh = self._write_mesh_prim(path.AppendChild(_prim_name(node.name, child_names)), mesh)
             _write_geometric(usd_mesh, node.transform)
             self.material_users.append((usd_mesh.GetPath(), node, mesh))
             tokens = _write_blend_shape_targets(self.stage, usd_mesh, mesh) if mesh.blend_shapes else []

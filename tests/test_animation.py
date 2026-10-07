@@ -269,7 +269,7 @@ def test_usd_skel_animation_matches_usdskel():
     skeleton = stage.GetPrimAtPath("/SkelRoot/root")
     assert [str(t) for t in UsdSkel.BindingAPI(skeleton).GetAnimationSourceRel().GetTargets()] == ["/SkelRoot/root/take"]
     assert UsdSkel.BakeSkinning(stage.Traverse())
-    usd_mesh = UsdGeom.Mesh(stage.GetPrimAtPath("/SkelRoot/strip/Strip"))
+    usd_mesh = UsdGeom.Mesh(stage.GetPrimAtPath("/SkelRoot/strip/strip"))
     times = clip.frame_times()
     ours = clip.skinned_vertices(scene, scene.meshes[0], times)
     for f in range(0, len(times), 6):
