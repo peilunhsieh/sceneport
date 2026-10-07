@@ -549,4 +549,25 @@ future changes can keep them consistent (or revisit them deliberately).
   meshes too: 119 of Spring's 148) get no cache. A mesh with shape keys loses
   their effect under the cache (warned). Making such animation editable needs a
   rig: fitting one (skinning decomposition) is a possible later addition.
-- Materials, cameras and lights aren't written yet (warned).
+- **Cameras and lights** (`blend/cameras_lights.py`) use the values Blender's
+  own USD importer sets for the same scene, so both routes into Blender agree:
+  horizontal sensor fit with shift = offset / sensor width; energy = intensity
+  x pi (sun x 4) with exposure, color temperature, normalize and the diffuse /
+  specular factors as Blender's own light properties; spot size = 2 x cone;
+  rect / disk = area lights (disk size = 2 x radius); cylinders = point lights
+  (warned); no shadow color or light textures (warned). Two deliberate
+  differences: a sun's `angle` is used as is (USD's angular diameter, the same
+  as Blender's; Blender's importer doubles it), and the render height is set so
+  the scene camera's film aspect holds (the importer keeps 1920 x 1080). Their
+  animated settings are F-curves on the camera / light data (`lens`, `energy`,
+  `spot_size`, ...; shift keys divide by the sensor width, on the offset's keys
+  if the width is animated too).
+- **The first dome light becomes the World** (Blender has one): Environment
+  Texture -> Background with strength = intensity x 2^exposure, through a
+  Mapping node (point, XYZ Euler) set to R_default @ R^-1, R the dome's world
+  rotation and R_default = Euler(90, 0, 90), Blender's own World orientation as
+  a dome. This is the rule Blender's USD importer follows (checked on Z-up and
+  Y-up domes). A turning or brightening dome is sampled onto the Mapping and
+  Background nodes. The dome node stays an empty. Note that Blender's USD
+  importer only fills a World the scene already has.
+- Materials aren't written yet (warned).

@@ -50,8 +50,10 @@ def inspect_blend(payload: dict) -> dict:
     world-space points (shape keys and armatures applied); for armatures their bones (parent, length,
     rest matrix and posed matrix, in armature space). Returns {"objects": [...], "collections": the scene
     collection's tree (name, objects, hide_render, hide_viewport, color_tag, children), "scene": fps and
-    frame range, "actions": names, fake users, slots and F-curve paths, "frames": per frame in
-    payload["frames"], each object's world matrix and (meshes) evaluated world points}."""
+    frame range, "actions": names, fake users, slots and F-curve paths, "world": the World's nodes,
+    "frames": per frame in payload["frames"], each object's world matrix, (meshes) evaluated world points,
+    (cameras / lights) their settings, the World's mapping rotation and strength, and the scene camera's
+    view (Blender's world_to_camera_view) of payload["points"] (world space)}."""
     import bpy
     import numpy as np
 
@@ -63,6 +65,31 @@ def inspect_blend(payload: dict) -> dict:
         return out.reshape(-1, width) if width > 1 else out
 
     depsgraph = bpy.context.evaluated_depsgraph_get()
+    camera_keys = ("type", "lens", "sensor_fit", "sensor_width", "sensor_height", "shift_x", "shift_y", "clip_start",
+                   "clip_end", "ortho_scale")
+    light_keys = ("type", "energy", "exposure", "shadow_soft_size", "spot_size", "spot_blend", "shape", "size", "size_y",
+                  "angle", "normalize", "use_temperature", "temperature", "diffuse_factor", "specular_factor", "use_shadow")
+
+    def settings(data, keys) -> dict:
+        out = {k: getattr(data, k) for k in keys if hasattr(data, k)}
+        if hasattr(data, "color"):
+            out["color"] = tuple(data.color)
+        if hasattr(data, "dof"):
+            out.update(use_dof=data.dof.use_dof, focus_distance=data.dof.focus_distance, aperture_fstop=data.dof.aperture_fstop)
+        return out
+
+    def world_state() -> dict | None:
+        world = scene.world
+        if world is None or world.node_tree is None:
+            return None
+        nodes = {n.bl_idname: n for n in world.node_tree.nodes}
+        mapping, background = nodes.get("ShaderNodeMapping"), nodes.get("ShaderNodeBackground")
+        environment = nodes.get("ShaderNodeTexEnvironment")
+        return {"nodes": sorted(nodes), "strength": background.inputs["Strength"].default_value if background else None,
+                "mapping": (mapping.vector_type, tuple(mapping.inputs["Rotation"].default_value)) if mapping else None,
+                "image": environment.image.filepath if environment and environment.image else None}  # fmt: skip
+
+    scene = bpy.context.scene
     out = []
     for obj in bpy.data.objects:
         info = {
@@ -70,6 +97,10 @@ def inspect_blend(payload: dict) -> dict:
             "rotation_mode": obj.rotation_mode, "matrix_world": np.array(obj.matrix_world),
             "parent_bone": obj.parent_bone if obj.parent_type == "BONE" else None,
         }  # fmt: skip
+        if obj.type == "CAMERA":
+            info["camera"] = settings(obj.data, camera_keys)
+        if obj.type == "LIGHT":
+            info["light"] = settings(obj.data, light_keys)
         if obj.type == "ARMATURE":
             info["bones"] = [
                 {"name": b.name, "parent": b.parent.name if b.parent else None, "length": b.length,
@@ -105,7 +136,9 @@ def inspect_blend(payload: dict) -> dict:
                 "hide_viewport": c.hide_viewport, "color_tag": c.color_tag,
                 "children": [collection(child) for child in c.children]}  # fmt: skip
 
-    scene = bpy.context.scene
+    from bpy_extras.object_utils import world_to_camera_view
+    from mathutils import Vector
+
     frames = {}
     for frame in payload.get("frames", []):
         scene.frame_set(int(frame))
@@ -118,7 +151,14 @@ def inspect_blend(payload: dict) -> dict:
                 evaluated = obj.evaluated_get(depsgraph).to_mesh()
                 entry["world_vertices"] = get(evaluated.vertices, "co", 3) @ world[:3, :3].T + world[:3, 3]
                 obj.evaluated_get(depsgraph).to_mesh_clear()
+            if obj.type == "CAMERA":
+                entry["camera"] = settings(obj.data, camera_keys)
+            if obj.type == "LIGHT":
+                entry["light"] = settings(obj.data, light_keys)
             state[obj.name] = entry
+        state["_world"] = world_state()
+        if scene.camera is not None and "points" in payload:
+            state["_view"] = np.array([tuple(world_to_camera_view(scene, scene.camera, Vector(p))) for p in payload["points"]])
         frames[frame] = state
     actions = [
         {"name": a.name, "fake_user": a.use_fake_user, "frame_range": tuple(a.frame_range),
@@ -133,6 +173,9 @@ def inspect_blend(payload: dict) -> dict:
         "scene": {"fps": scene.render.fps / scene.render.fps_base, "frame_range": (scene.frame_start, scene.frame_end)},
         "actions": actions,
         "cache_files": [c.filepath for c in bpy.data.cache_files],
+        "world": world_state(),
+        "scene_camera": scene.camera.name if scene.camera else None,
+        "render": (scene.render.resolution_x, scene.render.resolution_y),
         "frames": frames,
     }
 

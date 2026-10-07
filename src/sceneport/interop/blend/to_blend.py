@@ -30,8 +30,13 @@ collection); an object in any collection is linked only there, others stay in
 the scene's collection. A joint has no object: its armature is linked instead.
 extras["blender"] values are set on the collection where it has that property
 (e.g. hide_render, color_tag). A node under a joint is parented to its bone, with a parent
-inverse that cancels Blender's offset to the bone's tail. Materials, cameras,
-lights and animation aren't written yet: they're skipped with a warning.
+inverse that cancels Blender's offset to the bone's tail.
+
+Cameras and lights become camera / light objects and the first dome light the
+World (cameras_lights.py), the first camera the scene's; their animated settings
+are F-curves on the camera / light data, and a dome's turning or brightness is
+sampled onto the World's nodes. Materials aren't written yet: skipped with a
+warning.
 """
 
 from __future__ import annotations
@@ -48,7 +53,9 @@ from mathutils import Matrix
 from ...math import _axes, complete_rotation, quaternion_continuity, quaternion_from_matrix
 from ...scene.animation import Animation, Channel, _auto_slopes
 from ...scene.types import Mesh, Node, Primvar, Scene
+from . import cameras_lights
 from .cache import moving, write_point_cache
+from ..reframe import key_times
 from .compat import Rig, pose_tracks, prepare, rigs
 
 SLIDER_LIMIT = 10.0  # Blender's widest shape key slider range is -10..10
@@ -80,6 +87,8 @@ def scene_to_blender(
     rig_of = {bone.joint: rig for rig in layout for bone in rig.bones}
     meshes: dict[int, bpy.types.Mesh] = {}
     objects: dict[Node, bpy.types.Object] = {}
+    blend_dir = Path(blend_path).parent if blend_path else (Path(bpy.data.filepath).parent if bpy.data.filepath else None)
+    domes: list[Node] = []
     rig_objects: dict[int, bpy.types.Object] = {}  # id(Rig) -> its armature object
     under_bones: list[tuple[Node, Node]] = []  # (node, parent joint): parented to a bone once bones exist
 
@@ -98,6 +107,16 @@ def scene_to_blender(
             if first:
                 meshes[id(node.mesh)] = _mesh(node.mesh)
             data = meshes[id(node.mesh)]
+        if node.camera is not None or node.light is not None:
+            if data is not None:
+                warnings.warn(f"{node.name!r}: a Blender object can't be a mesh or armature and a camera / light; "
+                              "its camera / light is skipped")  # fmt: skip
+            elif node.camera is not None:
+                data = cameras_lights.camera_data(node.camera, node.name)
+            elif node.light.type == "dome":
+                domes.append(node)  # the World; the node stays an empty
+            else:
+                data = cameras_lights.light_data(node.light, node.name, node.name)
         obj = bpy.data.objects.new(node.name, data)
         collection.objects.link(obj)
         if node.mesh is not None and node not in held and first and node.mesh.blend_shapes:
@@ -114,6 +133,14 @@ def scene_to_blender(
 
     for root in scene.nodes:
         build(root, None)
+    cameras = [node for node in objects if node.camera is not None and objects[node].type == "CAMERA"]
+    if cameras:
+        cameras_lights.use_camera(objects[cameras[0]], cameras[0].camera)
+    world_matrices = scene.world_matrices()
+    if domes:
+        cameras_lights.world_from_dome(domes[0].light, world_matrices[domes[0]][:3, :3], blend_dir)
+        if len(domes) > 1:
+            warnings.warn(f"Blender has one World: dome lights {[d.name for d in domes[1:]]} are skipped")
 
     bone_names = {}
     for rig in layout:
@@ -133,7 +160,7 @@ def scene_to_blender(
     if scene.collections:
         _collections(scene, collection, objects, {j: rig_objects[id(r)] for j, r in rig_of.items()})
     for index, clip in enumerate(scene.animations):
-        _action(scene, clip, index == 0, objects, meshes, layout, rig_objects, bone_names)
+        _action(scene, clip, index == 0, objects, meshes, layout, rig_objects, bone_names, domes[:1])
     _point_caches(scene, objects, cache_path, blend_path)
     return objects
 
@@ -180,7 +207,7 @@ OBJECT_PATHS = {"translation": "location", "rotation": "rotation_euler", "scale"
 
 
 def _action(scene: Scene, clip: Animation, assign: bool, objects: dict, meshes: dict, layout: list[Rig],
-            rig_objects: dict, bone_names: dict) -> None:  # fmt: skip
+            rig_objects: dict, bone_names: dict, domes: list[Node]) -> None:  # fmt: skip
     """One Action for `clip`; `assign`: give every animated datablock this action (the first clip)."""
     fps = scene.animations[0].fps
     if assign:
@@ -211,6 +238,12 @@ def _action(scene: Scene, clip: Animation, assign: bool, objects: dict, meshes: 
             key = meshes[id(channel.target)].shape_keys
             if channel.property in key.key_blocks:
                 _fcurve(bag(key, "KEY"), f'key_blocks["{channel.property}"].value', 0, channel, 1.0, fps, None)
+    unwritten = _attribute_fcurves(clip, objects, bag, fps)
+    if unwritten:
+        warnings.warn(f"clip {clip.name!r}: Blender can't animate {', '.join(sorted(unwritten))}; not written")
+    world = bpy.context.scene.world
+    if domes and world is not None and world.node_tree is not None:
+        _dome_fcurves(scene, clip, domes[0], world, bag, fps)
     for rig in layout:
         tracks = pose_tracks(scene, rig, clip)
         if tracks is not None:
@@ -225,6 +258,70 @@ def _action(scene: Scene, clip: Animation, assign: bool, objects: dict, meshes: 
         data = datablock.animation_data or datablock.animation_data_create()
         data.action = action
         data.action_slot = slot
+
+
+def _attribute_fcurves(clip: Animation, objects: dict, bag, fps: float) -> set[str]:
+    """Camera and light channels as F-curves on the object's camera / light data; returns what can't be."""
+    unwritten = set()
+    for channel in clip.channels:
+        if channel.attribute is None or channel.target not in objects:
+            continue
+        kind, field = channel.attribute
+        data = objects[channel.target].data
+        if kind == "camera" and isinstance(data, bpy.types.Camera):
+            camera = channel.target.camera
+            if field in ("horizontal_aperture_offset", "vertical_aperture_offset"):  # shift = offset / sensor width
+                if any(c.target is channel.target and c.attribute == ("camera", "horizontal_aperture") for c in clip.channels):
+                    times = channel.times  # the width moves too: divide by it on the offset's keys
+                    width = clip.attribute_values(channel.target, "camera", times)["horizontal_aperture"]
+                    channel = Channel(channel.target, channel.property, 0, times, channel.values / width, channel.interpolation)
+                    factor = 1.0
+                else:
+                    factor = 1.0 / camera.horizontal_aperture
+                path = "shift_x" if field.startswith("horizontal") else "shift_y"
+                _fcurve(bag(data, "CAMERA"), path, 0, channel, factor, fps, None)
+            elif field in cameras_lights.CAMERA_PATHS:
+                path, factor = cameras_lights.CAMERA_PATHS[field]
+                _fcurve(bag(data, "CAMERA"), path, 0, channel, factor, fps, None)
+            else:
+                unwritten.add(f"camera {field}")
+        elif kind == "light" and isinstance(data, bpy.types.Light):
+            paths = cameras_lights.light_paths(channel.target.light)
+            if field not in paths:
+                unwritten.add(f"light {field}")
+                continue
+            path, factor = paths[field]
+            _fcurve(bag(data, "LIGHT"), path, channel.component if field == "color" else 0, channel, factor, fps, None)
+            if field == "temperature":
+                data.use_temperature = True
+    return unwritten
+
+
+def _dome_fcurves(scene: Scene, clip: Animation, dome: Node, world, bag, fps: float) -> None:
+    """The World's Mapping rotation and Background strength, sampled on every frame and key, when the dome's
+    orientation (its or an ancestor's transform) or brightness is animated."""
+    parents = scene.parents()
+    chain, node = set(), dome
+    while node is not None:
+        chain.add(node)
+        node = parents[node]
+    nodes = world.node_tree.nodes
+    mapping = next((n for n in nodes if n.bl_idname == "ShaderNodeMapping"), None)
+    turning = [c for c in clip.channels if c.is_transform and c.target in chain]
+    if turning and mapping is not None:
+        times = key_times(clip, turning)
+        rotation = clip.world_matrices(scene, times)[dome][:, :3, :3]
+        euler = np.unwrap(cameras_lights.dome_mapping_rotation(rotation), axis=0)
+        for axis in range(3):
+            channel = Channel(dome, "rotation", axis, times, euler[:, axis])
+            _fcurve(bag(world.node_tree, "NODETREE"), f'nodes["{mapping.name}"].inputs[2].default_value', axis, channel, 1.0, fps, None)
+    bright = [c for c in clip.channels if c.target is dome and c.attribute in (("light", "intensity"), ("light", "exposure"))]
+    if bright:
+        background = next(n for n in nodes if n.bl_idname == "ShaderNodeBackground")
+        times = key_times(clip, bright)
+        values = clip.attribute_values(dome, "light", times)
+        channel = Channel(dome, "light:intensity", 0, times, values["intensity"] * 2.0 ** values["exposure"])
+        _fcurve(bag(world.node_tree, "NODETREE"), f'nodes["{background.name}"].inputs[1].default_value', 0, channel, 1.0, fps, None)
 
 
 def _fcurve(bag, path: str, index: int, channel: Channel, factor: float, fps: float, group: str | None) -> None:
@@ -447,8 +544,6 @@ def _warn_unsupported(scene: Scene) -> None:
         what
         for what, present in (
             ("materials", bool(scene.materials) or any(n.materials for n in nodes)),
-            ("cameras", any(n.camera is not None for n in nodes)),
-            ("lights", any(n.light is not None for n in nodes)),
             ("blend shape normal offsets (Blender computes shape normals)",
              any(s.normal_offsets is not None for m in scene.meshes for s in m.blend_shapes)),
         )
