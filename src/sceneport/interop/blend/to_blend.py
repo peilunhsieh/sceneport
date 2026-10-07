@@ -9,7 +9,13 @@ animated weights fall outside it (Blender clamps values to the slider).
 
 Armatures follow compat.rigs: each joint tree's plain parent node becomes the
 armature object (compat.prepare adds one where needed, and moves skinned meshes
-under it); bones rest in the bind pose and are posed to the scene's current pose. A node under a joint is parented to its bone, with a parent
+under it); bones rest in the bind pose and are posed to the scene's current pose.
+
+Collections become Blender collections, nested the same way (under the scene's
+collection); an object in any collection is linked only there, others stay in
+the scene's collection. A joint has no object: its armature is linked instead.
+extras["blender"] values are set on the collection where it has that property
+(e.g. hide_render, color_tag). A node under a joint is parented to its bone, with a parent
 inverse that cancels Blender's offset to the bone's tail. Materials, cameras,
 lights and animation aren't written yet: they're skipped with a warning.
 """
@@ -101,7 +107,46 @@ def scene_to_blender(scene: Scene, *, collection=None) -> dict[Node, bpy.types.O
     for node, obj in objects.items():
         if node.mesh is not None and node.mesh.skin is not None and node not in held:
             _skin(obj, node.mesh, rig_of, rig_objects, bone_names)
+    if scene.collections:
+        _collections(scene, collection, objects, {j: rig_objects[id(r)] for j, r in rig_of.items()})
     return objects
+
+
+def _collections(scene: Scene, parent, objects: dict, armature_of: dict) -> None:
+    made: dict[int, bpy.types.Collection] = {}
+    linked, joints = set(), []
+
+    def build(collection, parent_collection) -> None:
+        if id(collection) in made:  # nested under several collections: link it again
+            parent_collection.children.link(made[id(collection)])
+            return
+        data = made[id(collection)] = bpy.data.collections.new(collection.name)
+        parent_collection.children.link(data)
+        for key, value in collection.extras.get("blender", {}).items():
+            if hasattr(data, key):
+                try:
+                    setattr(data, key, value)
+                except (AttributeError, TypeError, ValueError):
+                    warnings.warn(f"collection {collection.name!r}: can't set {key}={value!r}")
+        for node in collection.nodes:
+            obj = objects.get(node)
+            if obj is None and node in armature_of:
+                joints.append(node.name)
+                obj = armature_of[node]
+            if obj is not None and obj.name not in data.objects:
+                data.objects.link(obj)
+                linked.add(obj)
+        for child in collection.children:
+            build(child, data)
+
+    for top in scene.collections:
+        build(top, parent)
+    for obj in linked:  # in a collection: not also loose in the scene's own collection
+        if obj.name in parent.objects:
+            parent.objects.unlink(obj)
+    if joints:
+        warnings.warn(f"joints {joints[:3]}{'...' if len(joints) > 3 else ''} are in collections; Blender bones aren't "
+                      "objects, so their armature is linked instead")  # fmt: skip
 
 
 def _set_transform(obj, node: Node) -> None:

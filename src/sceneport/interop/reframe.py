@@ -24,8 +24,8 @@ FLIP[3, 3] = 1.0  # -I on the linear part: a point reflection
 
 def copy_scene(scene: Scene, meshes: dict[int, Mesh], transforms: dict[Node, Transform], channels) -> Scene:
     """A copy with new Nodes (transforms from `transforms` where given), meshes replaced per `meshes`
-    (every skinned mesh is copied so its skin points at the new joints) and each clip's channels
-    from `channels(clip)`, re-targeted to the copies."""
+    (every skinned mesh is copied so its skin points at the new joints), each clip's channels
+    from `channels(clip)`, re-targeted to the copies, and collections listing the copies."""
     node_map: dict[Node, Node] = {}
 
     def copy_node(node: Node) -> Node:
@@ -49,6 +49,10 @@ def copy_scene(scene: Scene, meshes: dict[int, Mesh], transforms: dict[Node, Tra
         target = mesh_map[id(channel.target)] if channel.is_blend_shape else node_map[channel.target]  # nodes: transforms, cameras, lights
         return dataclasses.replace(channel, target=target)
 
+    def copy_collection(collection):
+        return dataclasses.replace(collection, nodes=[node_map[n] for n in collection.nodes if n in node_map],
+                                   children=[copy_collection(c) for c in collection.children])  # fmt: skip
+
     def retarget_points(samples):
         return dataclasses.replace(samples, mesh=mesh_map.get(id(samples.mesh), samples.mesh))
 
@@ -57,7 +61,8 @@ def copy_scene(scene: Scene, meshes: dict[int, Mesh], transforms: dict[Node, Tra
                             point_samples=[retarget_points(p) for p in clip.point_samples])
         for clip in scene.animations
     ]  # fmt: skip
-    return dataclasses.replace(scene, nodes=roots, animations=animations)
+    collections = [copy_collection(c) for c in scene.collections]
+    return dataclasses.replace(scene, nodes=roots, animations=animations, collections=collections)
 
 
 def key_times(clip: Animation, channels: list[Channel]) -> NDArray[np.float64]:

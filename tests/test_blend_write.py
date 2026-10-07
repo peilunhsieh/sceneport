@@ -30,7 +30,7 @@ def face_scene() -> Scene:
 
 
 def objects(path) -> dict:
-    return {o["name"]: o for o in run_in_blender("inspect_blend", {"path": str(path)})}
+    return {o["name"]: o for o in run_in_blender("inspect_blend", {"path": str(path)})["objects"]}
 
 
 def test_write_mesh_and_shape_keys(blender, tmp_path):

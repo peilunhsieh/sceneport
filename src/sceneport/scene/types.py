@@ -484,6 +484,32 @@ class Skin:
         return out
 
 
+@dataclass(eq=False)
+class Collection:
+    """A named group of nodes for organizing a scene (Blender collections, USD UsdCollectionAPI, Maya sets).
+
+    Membership is explicit: a member's children aren't members unless listed. A node may be in several
+    collections or none; collections nest through `children`. Collections don't change transforms or the
+    node tree (grouping with a transform is a parent node). Collections compare by identity.
+    """
+
+    name: str
+    nodes: list[Node] = field(default_factory=list)  # direct members
+    children: list[Collection] = field(default_factory=list)  # nested collections
+    # Format-specific data kept for round trips, keyed by format, e.g. extras["blender"]["hide_render"].
+    extras: dict[str, Any] = field(default_factory=dict)
+
+    def walk(self) -> Iterator[Collection]:
+        """This collection, then its nested collections, depth first."""
+        yield self
+        for child in self.children:
+            yield from child.walk()
+
+    def all_nodes(self) -> list[Node]:
+        """Members of this collection and its nested collections, each once, in order."""
+        return list(dict.fromkeys(node for collection in self.walk() for node in collection.nodes))
+
+
 AXES = ("+X", "-X", "+Y", "-Y", "+Z", "-Z")
 
 
@@ -505,6 +531,7 @@ class Scene:
     extras: dict[str, Any] = field(default_factory=dict)
     animations: list[Animation] = field(default_factory=list)  # clips, see scene/animation.py
     materials: list[Material] = field(default_factory=list)  # every material, bound or not; see scene/material.py
+    collections: list[Collection] = field(default_factory=list)  # top-level collections; see Collection
 
     def __post_init__(self):
         for name in ("up_axis", "front_axis", "right_axis"):
@@ -560,6 +587,29 @@ class Scene:
 
     def find(self, name: str) -> Node | None:
         return next((n for n, _ in self.walk() if n.name == name), None)
+
+    def all_collections(self) -> list[Collection]:
+        """Every collection, nested ones included, depth first."""
+        return [c for top in self.collections for c in top.walk()]
+
+    def find_collection(self, name: str) -> Collection | None:
+        return next((c for c in self.all_collections() if c.name == name), None)
+
+    def validate_collections(self) -> None:
+        """Raise if a collection lists a node that isn't in the scene, or collections nest in a loop."""
+        nodes = {node for node, _ in self.walk()}
+
+        def check(collection: Collection, path: tuple[Collection, ...]) -> None:
+            if collection in path:
+                raise ValueError(f"collection {collection.name!r} contains itself")
+            missing = [n.name for n in collection.nodes if n not in nodes]
+            if missing:
+                raise ValueError(f"collection {collection.name!r} lists nodes not in the scene: {missing[:3]}")
+            for child in collection.children:
+                check(child, path + (collection,))
+
+        for top in self.collections:
+            check(top, ())
 
     @property
     def meshes(self) -> list[Mesh]:

@@ -35,7 +35,8 @@ def _convert(args: argparse.Namespace) -> None:
     save(scene, output, **options)
     joints = sum(node.joint for node, _ in scene.walk())
     clips = ", ".join(f"{clip.name} ({len(clip.frame_times())} frames)" for clip in scene.animations) or "none"
-    print(f"{args.input} -> {output}: {len(scene.meshes)} meshes, {joints} joints, animations: {clips}")
+    collections = f", {len(scene.all_collections())} collections" if scene.collections else ""
+    print(f"{args.input} -> {output}: {len(scene.meshes)} meshes, {joints} joints{collections}, animations: {clips}")
 
 
 def main(argv: list[str] | None = None) -> None:

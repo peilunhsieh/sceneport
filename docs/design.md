@@ -101,6 +101,32 @@ future changes can keep them consistent (or revisit them deliberately).
 - FBX blend shapes are named like Blender does: after the Shape geometry when
   a channel has one target, after the channel when it has in-betweens.
 
+## Collections
+
+- `Scene.collections` holds `Collection`s: named groups of nodes for
+  organizing a scene, nestable (`children`), with format data in `extras`
+  (e.g. `extras["blender"]["hide_render"]`). They don't touch transforms or the
+  node tree: a group with a transform is a parent node. Membership is explicit
+  (a member's children aren't implied) and a node may be in several collections
+  or none, as in Blender, Maya sets and USD collections. Scene rewrites
+  (`reframe.copy_scene`) point collections at the copied nodes.
+- USD: one `UsdCollectionAPI` per collection on the default prim, with
+  `expansionRule = explicitOnly` and nested collections included by their
+  collection path (`</root.collection:Chairs>`); collection names are made
+  valid identifiers and the originals, the order and the plain parts of
+  `extras` are kept in the prim's `customData` (`sceneport:collections`). A
+  joint has no prim: its Skeleton is included (read back as its root joint).
+  Other tools' collections on the default prim are read through USD's own
+  membership rules (expansion, excludes, expressions), mapped to nodes, flat;
+  linking collections (`lightLink`, `shadowLink`, `filterLink`) are skipped.
+  Blender's USD exporter writes no collections (prims follow parenting) and its
+  importer ignores these.
+- .blend: Blender collections nested the same way; objects in any collection
+  are linked only there, and `extras["blender"]` values are set where the
+  collection has that property. A joint's armature stands in for it.
+- FBX (Maya / Max display layers and selection sets) isn't read or written yet:
+  saving warns.
+
 ## Transforms
 
 - `Transform` follows FBX's full formula (translation, Euler rotation with

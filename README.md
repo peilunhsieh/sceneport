@@ -73,6 +73,12 @@ source.inputs["file"].value              # AssetPath("tex/wood.png", resolved=..
 pbr = material.pbr()                     # metallic-roughness view: UsdPreviewSurface, MaterialX, FBX Phong
 pbr.base_color, pbr.roughness, pbr.base_color_texture.file, pbr.notes  # notes: what was approximated or skipped
 
+# Collections (USD and .blend): named, nestable groups of nodes, without transforms
+props = Collection("Props", [table, shelf], children=[Collection("Chairs", [chair])])
+scene.collections.append(props)          # a node may be in several collections, or none
+scene.find_collection("Chairs").nodes    # direct members (a member's children aren't implied)
+props.all_nodes()                        # members, nested collections included
+
 sceneport.save(scene, "out.fbx")
 ```
 

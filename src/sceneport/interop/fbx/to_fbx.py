@@ -56,6 +56,8 @@ def document_from_scene(
         warnings.warn("FBX can't hold per-vertex animation (point samples); it is not written (USD keeps it)")
     if any(node.light is not None and node.light.type == "dome" for node, _ in scene.walk()):
         warnings.warn("FBX has no environment (dome) light; it is written as an empty node (USD keeps it)")
+    if scene.collections:
+        warnings.warn("collections aren't written to FBX yet (USD and .blend keep them)")
     scene = prepare(scene, unmirror_joints=unmirror_joints, split_inbetweens=split_inbetweens)
     doc = FBXDocument(version=version, global_settings=write_global_settings(scene))
     geometries: dict[int, FBXObject] = {}  # id(Mesh) -> Geometry, so shared meshes are written once

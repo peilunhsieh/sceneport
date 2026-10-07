@@ -81,7 +81,7 @@ from ..scene.pbr import NATIVE_SURFACES, native_surface, preview_surface_nodes
 from .export import texture_path
 from .reframe import mirrored_joints, reframe, unmirror
 from .fbx.materials import inferred_fbx_type
-from ..scene.types import BlendShape, Inbetween, Mesh, Node, Primvar, Scene, Skin, Transform
+from ..scene.types import BlendShape, Collection, Inbetween, Mesh, Node, Primvar, Scene, Skin, Transform
 
 EXTENSIONS = (".usd", ".usda", ".usdc", ".usdz")
 NAME_KEY = "sceneport:name"  # customData: a primvar's original name
@@ -90,6 +90,8 @@ GENERATED_KEY = "sceneport:generated"  # customData: a prim added only for USD's
 BLENDER_GENERATED_KEY = "Blender:generated"  # Blender's tag for its exporter's /root (dropped on load too)
 JOINT_OP = "sceneportJoint"  # xformOp suffix placing an attachment at its joint
 ACTIVE_CLIP_KEY = "sceneport:activeClip"  # root layer customLayerData: name of the clip on the timeline
+COLLECTIONS_KEY = "sceneport:collections"  # customData of the default prim: {token: {name, index, extras}}
+LINK_COLLECTIONS = {"lightLink", "shadowLink", "filterLink"}  # UsdLux linking collections: not organizational
 FBX_TYPE_KEY = "sceneport:fbxType"  # customData of a shader port: its FBX [type, subtype, flags], if not the inferred one
 IMPLIED_AXES = {"+Y": ("+Z", "+X"), "+Z": ("-Y", "+X")}  # up -> (front, right)
 
@@ -209,6 +211,23 @@ def _export(stage: Usd.Stage, path: Path) -> None:
         raise OSError(f"could not write {path}")
 
 
+def _plain_dict(value: dict) -> dict:
+    """The parts of a nested dict USD customData can hold (str keys; bool, int, float and str values)."""
+    out = {}
+    for key, item in value.items():
+        if isinstance(item, dict):
+            item = _plain_dict(item)
+            if item:
+                out[str(key)] = item
+        elif isinstance(item, (bool, int, float, str)):
+            out[str(key)] = item
+    return out
+
+
+def _dict_copy(value) -> dict:
+    return {k: _dict_copy(v) if isinstance(v, dict) else v for k, v in dict(value).items()}
+
+
 def _prim_name(name: str, taken: set[str]) -> str:
     base = Tf.MakeValidIdentifier(name or "node")
     candidate, i = base, 1
@@ -262,6 +281,8 @@ class _Writer:
         self.skel_roots: set[Node] = set()  # nodes written as SkelRoot
         self.wrapped: list[Node] = []  # root nodes placed under a generated SkelRoot
         self.bindings: list[tuple[UsdGeom.Mesh, Mesh, _SkeletonPlan]] = []
+        self.node_paths: dict[Node, Sdf.Path] = {}  # non-joint node -> its prim
+        scene.validate_collections()
         self.own_skeletons: list[_SkeletonPlan] = []  # jointless skeletons of unskinned blend shape meshes
         for clip in scene.animations:
             clip.validate()
@@ -363,7 +384,39 @@ class _Writer:
         if default is not None:
             self.stage.SetDefaultPrim(self.stage.GetPrimAtPath(default))
         self._write_materials(default if default is not None else Sdf.Path.absoluteRootPath)
+        if self.scene.collections:
+            self._write_collections(default)
         self._finish()
+
+    def _write_collections(self, owner: Sdf.Path | None) -> None:
+        """Every collection as a UsdCollectionAPI on the default prim (explicitOnly: members' descendants aren't
+        implied), nested ones included by collection path; names, order and plain extras in customData."""
+        if owner is None:
+            warnings.warn("the scene has collections but no nodes; collections aren't written")
+            return
+        prim = self.stage.GetPrimAtPath(owner)
+        collections = self.scene.all_collections()
+        taken = set(LINK_COLLECTIONS)
+        tokens = {c: _prim_name(c.name, taken) for c in collections}
+        joints = []
+        info = {}
+        for index, collection in enumerate(collections):
+            targets = []
+            for node in collection.nodes:
+                if node.joint:  # joints have no prims: the Skeleton holding them stands in
+                    joints.append(node.name)
+                    targets.append(self.plans[self._root_joint(node)].path)
+                elif node in self.node_paths:
+                    targets.append(self.node_paths[node])
+            targets += [Usd.CollectionAPI.GetNamedCollectionPath(prim, tokens[c]) for c in collection.children]
+            api = Usd.CollectionAPI.Apply(prim, tokens[collection])
+            api.CreateExpansionRuleAttr(Usd.Tokens.explicitOnly)
+            api.CreateIncludesRel().SetTargets(list(dict.fromkeys(targets)))
+            info[tokens[collection]] = {"name": collection.name, "index": index, "extras": _plain_dict(collection.extras)}
+        prim.SetCustomDataByKey(COLLECTIONS_KEY, info)
+        if joints:
+            warnings.warn(f"joints {joints[:3]}{'...' if len(joints) > 3 else ''} are in collections; USD joints have "
+                          "no prims, so their Skeleton is included instead")  # fmt: skip
 
     def _write_node(
         self, parent: Sdf.Path, node: Node, taken: set[str], joint: tuple[str, NDArray] | None = None
@@ -375,6 +428,7 @@ class _Writer:
             return plan.path if plan is not None else None
 
         path = parent.AppendChild(_prim_name(node.name, taken))
+        self.node_paths[node] = path
         mesh = node.mesh
         own_skeleton = mesh is not None and bool(mesh.blend_shapes) and mesh.skin is None
         prim_type = UsdSkel.Root if own_skeleton or node in self.skel_roots else UsdGeom.Xform
@@ -1154,6 +1208,7 @@ class _Reader:
         self.z_pole_domes: list[Node] = []  # DomeLight_1 nodes whose image pole is Z (turned to +Y after reading)
         self.fps = 24.0
         self.materials: dict[Sdf.Path, Material] = {}
+        self.nodes_by_path: dict[Sdf.Path, list[Node]] = {}  # prim -> the node(s) read from it, in stage order
 
     def read(self, stage: Usd.Stage, scene: Scene) -> None:
         self.fps = stage.GetTimeCodesPerSecond()
@@ -1167,6 +1222,41 @@ class _Reader:
         for mesh, prim in self.pending_skins:  # after all skeletons are known
             mesh.skin = self.read_skin(prim, mesh)
         scene.animations = self.read_animations(stage)
+        scene.collections = self.read_collections(stage)
+
+    def read_collections(self, stage: Usd.Stage) -> list[Collection]:
+        """The UsdCollectionAPI collections on the default prim (linking collections skipped). sceneport's own
+        are read as written; others get their members from USD's membership rules (expansion, excludes,
+        expressions), mapped to nodes, without nesting."""
+        owner = stage.GetDefaultPrim()
+        if not owner:
+            return []
+        info = owner.GetCustomDataByKey(COLLECTIONS_KEY) or {}
+        found = {}
+        for api in Usd.CollectionAPI.GetAllCollections(owner):
+            token = api.GetName()
+            if token in LINK_COLLECTIONS:
+                continue
+            meta = info.get(token)
+            collection = Collection(meta["name"] if meta else token, extras=_dict_copy(meta.get("extras", {})) if meta else {})
+            found[token] = (collection, api, meta)
+        nested = set()
+        for token, (collection, api, meta) in found.items():
+            nodes: list[Node] = []
+            if meta is not None and api.GetExpansionRuleAttr().Get() == Usd.Tokens.explicitOnly:
+                for target in api.GetIncludesRel().GetTargets():
+                    child = target.name.split(":", 1)[1] if target.IsPropertyPath() and target.GetPrimPath() == owner.GetPath() else None
+                    if child in found:
+                        collection.children.append(found[child][0])
+                        nested.add(child)
+                    else:
+                        nodes += self.nodes_by_path.get(target, [])
+            else:
+                included = Usd.CollectionAPI.ComputeIncludedPaths(api.ComputeMembershipQuery(), stage)
+                nodes = [n for path, ns in self.nodes_by_path.items() if path in included for n in ns]
+            collection.nodes = list(dict.fromkeys(nodes))
+        order = sorted(found, key=lambda t: (found[t][2] or {}).get("index", len(found)))
+        return [found[t][0] for t in order if t not in nested]
 
     def read_prim(self, prim: Usd.Prim, siblings: list[Node]) -> None:
         if prim.IsA(UsdSkel.Skeleton):
@@ -1192,6 +1282,7 @@ class _Reader:
         elif prim.HasAPI(UsdLux.LightAPI) or prim.IsA(UsdLux.BoundableLightBase) or prim.IsA(UsdLux.NonboundableLightBase):
             warnings.warn(f"{prim.GetPath()}: {prim.GetTypeName() or 'this'} light isn't supported; read as a plain node")
         siblings.append(node)
+        self.nodes_by_path[prim.GetPath()] = [node]
         self.read_node_samples(UsdGeom.Xformable(prim), node)
         if prim.IsA(UsdGeom.Mesh):
             node.mesh = self.get_mesh(prim)
@@ -1203,6 +1294,7 @@ class _Reader:
                     node.mesh = self.get_mesh(child)
                     node.materials = self.read_material_slots(child, node.mesh)
                     _set_geometric(node.transform, _read_transform(UsdGeom.Xformable(child)))
+                    self.nodes_by_path[child.GetPath()] = [node]
                     children.remove(child)
                     break
         for child in children:
@@ -1241,6 +1333,8 @@ class _Reader:
             if bind is not None and len(bind) == len(tokens):
                 bind_by_token[token] = bind[i]
         self.skeletons[prim.GetPath()] = (by_token, bind_by_token)
+        self.nodes_by_path[prim.GetPath()] = [holder] if target is not siblings else [
+            j for t, j in by_token.items() if _parent_token(t) not in by_token]  # the Skeleton: its root joints
         animations = [c for c in prim.GetChildren() if c.IsA(UsdSkel.Animation)]
         # The bound source may be authored on the Skeleton or inherited from an ancestor (e.g. the SkelRoot).
         bound = UsdSkel.BindingAPI(prim).GetInheritedAnimationSource()

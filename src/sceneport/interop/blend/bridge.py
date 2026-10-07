@@ -43,12 +43,13 @@ def write_blend(payload: dict) -> None:
     write_blend(payload["scene"], payload["path"])
 
 
-def inspect_blend(payload: dict) -> list[dict]:
+def inspect_blend(payload: dict) -> dict:
     """What a .blend holds, as plain data (a diagnostic, used by the tests): per object its name, type,
     parent (and parent bone), rotation mode and world matrix; for meshes their points, faces, corner
     normals, UV maps, shape keys (points, value, slider range), vertex groups, modifiers and evaluated
     world-space points (shape keys and armatures applied); for armatures their bones (parent, length,
-    rest matrix and posed matrix, in armature space)."""
+    rest matrix and posed matrix, in armature space). Returns {"objects": [...], "collections": the scene
+    collection's tree (name, objects, hide_render, hide_viewport, color_tag, children)}."""
     import bpy
     import numpy as np
 
@@ -96,7 +97,13 @@ def inspect_blend(payload: dict) -> list[dict]:
             info["world_vertices"] = points @ world[:3, :3].T + world[:3, 3]
             obj.evaluated_get(depsgraph).to_mesh_clear()
         out.append(info)
-    return out
+
+    def collection(c) -> dict:
+        return {"name": c.name, "objects": [o.name for o in c.objects], "hide_render": c.hide_render,
+                "hide_viewport": c.hide_viewport, "color_tag": c.color_tag,
+                "children": [collection(child) for child in c.children]}  # fmt: skip
+
+    return {"objects": out, "collections": collection(bpy.context.scene.collection)}
 
 
 ACTIONS = {"ping": ping, "write_blend": write_blend, "inspect_blend": inspect_blend}
