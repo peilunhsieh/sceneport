@@ -43,7 +43,8 @@ from numpy.typing import NDArray
 from ...math import complete_rotation, decompose_matrix
 from ...scene.types import Inbetween, Mesh, Node, Primvar, Scene, Transform
 from ..fbx.compat import _split_inbetweens
-from ..reframe import change_basis, copy_scene, mirrored_joints, unmirror
+from ..reframe import change_basis, copy_scene, key_times, mirrored_joints, unmirror
+from ...scene.animation import Animation, Channel
 
 UP, FRONT, RIGHT = "+Z", "-Y", "+X"  # Blender's axes, in FBX's meaning of front
 
@@ -68,7 +69,8 @@ def _holds_armature(node: Node | None) -> bool:
 
 def _armature_nodes(scene: Scene) -> Scene:
     """Give every joint tree a plain parent node and move skinned meshes under it (`scene` is restructured
-    in place: pass a copy). Animated mesh nodes that move are not handled yet (no animation is written)."""
+    in place: pass a copy). A moved mesh node whose world placement is animated (it or an ancestor, old or
+    new, has transform channels) gets its transform channels baked relative to its new parent."""
     parents = scene.parents()
     roots: dict[Node | None, list[Node]] = {}
     for node, _ in scene.walk():
@@ -104,13 +106,34 @@ def _armature_nodes(scene: Scene) -> Scene:
         holder = holder_of[root_joint(node.mesh.skin.joints[0])]
         if holder in ancestors(node):
             continue
+        baked = _baked_locals(scene, node, holder, {node, *ancestors(node), holder, *ancestors(holder)})
         siblings = scene.nodes if parents[node] is None else parents[node].children
         siblings.remove(node)
         holder.children.append(node)
         translation, rotation, scale = decompose_matrix(np.linalg.inv(world[holder]) @ world[node], node.transform.rotation_order)
         node.transform = Transform(translation=translation, rotation=rotation, scale=scale,
                                    rotation_order=node.transform.rotation_order)  # fmt: skip
+        for clip, (times, locals_) in baked.items():
+            translation, rotation, scale = decompose_matrix(locals_, node.transform.rotation_order)
+            rotation = np.degrees(np.unwrap(np.radians(rotation), axis=0))
+            clip.channels = [c for c in clip.channels if not (c.target is node and c.is_transform)] + [
+                Channel(node, prop, axis, times, values[:, axis])
+                for prop, values in (("translation", translation), ("rotation", rotation), ("scale", scale))
+                for axis in range(3)
+            ]
     return scene
+
+
+def _baked_locals(scene: Scene, node: Node, holder: Node, chain: set[Node]) -> dict[Animation, tuple]:
+    """For each clip animating `node` or a node in `chain`: (times, (F, 4, 4) node world relative to holder)."""
+    out = {}
+    for clip in scene.animations:
+        channels = [c for c in clip.channels if c.is_transform and c.target in chain]
+        if channels:
+            times = key_times(clip, channels)
+            world = clip.world_matrices(scene, times)
+            out[clip] = (times, np.linalg.inv(world[holder]) @ world[node])
+    return out
 
 
 def _bake_geometric(scene: Scene) -> Scene:
@@ -204,6 +227,7 @@ class Bone:
     rest: NDArray[np.float64]  # (4, 4) rest frame in armature space: the bind pose, without scale
     pose: NDArray[np.float64]  # (4, 4) posed matrix in armature space (Blender's PoseBone.matrix)
     length: float
+    bind: NDArray[np.float64] = field(default_factory=lambda: np.eye(4))  # (4, 4) the joint's bind world matrix
 
 
 @dataclass(eq=False)
@@ -247,7 +271,7 @@ def rigs(scene: Scene) -> list[Rig]:
             rest = _without_scale(a_inv @ b)
             pose = a_inv @ world[joint] @ np.linalg.inv(b) @ rig.world @ rest
             parent_joint = parents[joint] if parents[joint] is not None and parents[joint].joint else None
-            rig.bones.append(Bone(joint, parent_joint, rest, pose, 0.0))
+            rig.bones.append(Bone(joint, parent_joint, rest, pose, 0.0, b))
             stack.extend(c for c in reversed(joint.children) if c.joint)
         _bone_lengths(rig)
         out.append(rig)
@@ -307,3 +331,22 @@ def _bone_lengths(rig: Rig) -> None:
         else:
             length = 0.1 * size
         lengths[bone.joint] = bone.length = max(length, 0.002 * size)
+
+
+def pose_tracks(scene: Scene, rig: Rig, clip: Animation) -> tuple[NDArray, dict[Node, NDArray]] | None:
+    """The rig's posed matrices over `clip`, sampled on every frame and key: (times, {joint: (F, 4, 4)}), with
+    P(t) = A(t)^-1 @ J(t) @ B^-1 @ A @ R as in rigs() (A(t) the armature's world matrix then, A the one the
+    rest pose is expressed in). None when nothing moves the rig in the clip."""
+    parents = scene.parents()
+    moving = {rig.node, *(b.joint for b in rig.bones)}
+    node = rig.node
+    while parents[node] is not None:
+        node = parents[node]
+        moving.add(node)
+    channels = [c for c in clip.channels if c.is_transform and c.target in moving]
+    if not channels:
+        return None
+    times = key_times(clip, channels)
+    world = clip.world_matrices(scene, times)
+    a_inv = np.linalg.inv(world[rig.node])
+    return times, {b.joint: a_inv @ world[b.joint] @ np.linalg.inv(b.bind) @ rig.world @ b.rest for b in rig.bones}

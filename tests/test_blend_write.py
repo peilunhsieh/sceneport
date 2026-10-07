@@ -35,8 +35,7 @@ def objects(path) -> dict:
 
 def test_write_mesh_and_shape_keys(blender, tmp_path):
     scene = face_scene()
-    with pytest.warns(UserWarning, match="doesn't write animation"):
-        sceneport.save(scene, tmp_path / "face.blend", blender=blender)
+    sceneport.save(scene, tmp_path / "face.blend", blender=blender)
     written = objects(tmp_path / "face.blend")
     assert {(o["name"], o["type"], o["parent"]) for o in written.values()} == {
         ("Rig", "EMPTY", None), ("Head", "MESH", "Rig"), ("Marker", "EMPTY", None)}  # fmt: skip
@@ -168,9 +167,14 @@ def test_write_armature_and_skin(blender, tmp_path):
 def test_write_human_female(blender, sample, tmp_path):
     path = sample("usdskel_examples") / "HumanFemale" / "HumanFemale.walk.usd"
     scene = sceneport.load(path)
-    with pytest.warns(UserWarning):  # animation, materials ... aren't written yet
+    with pytest.warns(UserWarning):  # materials aren't written yet
         sceneport.save(scene, tmp_path / "human.blend", blender=blender)
-    written = objects(tmp_path / "human.blend")
+    clip = scene.animations[0]
+    start, end = (round(t * clip.fps) for t in clip.time_range())
+    frames = [start, (start + end) // 2, end]  # the walk runs from frame 101 to 129
+    result = run_in_blender("inspect_blend", {"path": str(tmp_path / "human.blend"), "frames": frames}, blender=blender)
+    assert result["scene"]["frame_range"] == (start, end)
+    written = {o["name"]: o for o in result["objects"]}
     armatures = [o for o in written.values() if o["type"] == "ARMATURE"]
     assert len(armatures) == 1 and len(armatures[0]["bones"]) == 66
     checked, seen = 0, {}
@@ -180,8 +184,10 @@ def test_write_human_female(blender, sample, tmp_path):
         count = seen[node.name] = seen.get(node.name, -1) + 1
         name = node.name if count == 0 else f"{node.name}.{count:03d}"
         if node.mesh is not None and node.mesh.skin is not None:
-            got = written[name]["world_vertices"]
-            np.testing.assert_allclose(got, expected_world_points(scene, node), atol=1e-5, err_msg=node.name)
+            for frame in frames:  # the walk, as USD's own evaluation in sceneport gives it
+                got = result["frames"][frame][name]["world_vertices"]
+                expected = clip.skinned_vertices(scene, node.mesh, [frame / clip.fps])[0] * scene.meters_per_unit
+                np.testing.assert_allclose(got, expected, atol=1e-5, err_msg=f"{node.name} frame {frame}")
             checked += 1
     assert checked == 89
 
@@ -200,3 +206,142 @@ def test_top_level_skeleton_gets_an_armature(blender, tmp_path):
         ("Root", "ARMATURE", None), ("Body", "MESH", "Root"), ("Hat", "EMPTY", "Root")}  # fmt: skip
     assert written["Root"]["bones"][0]["name"] == "Root"  # the root bone keeps its name too
     np.testing.assert_allclose(written["Body"]["world_vertices"], expected_world_points(scene, scene.find("Body")), atol=1e-5)
+
+
+# -- animation ---------------------------------------------------------------------------------
+
+
+def animated_rig() -> Scene:
+    """rig_scene() with a walk clip (joint rotations, a cubic root translation, the hat bobbing, the bulge
+    shape key) and a second clip."""
+    scene = rig_scene()
+    spine, head, root, hat, body = (scene.find(n) for n in ("Spine", "Head", "Root", "Hat", "Body"))
+    walk = Animation("walk", [
+        Channel(spine, "rotation", 2, [0.0, 0.5, 1.0], [25.0, -20.0, 25.0]),
+        Channel(head, "rotation", 0, [0.0, 1.0], [20.0, -30.0]),
+        Channel(root, "translation", 2, [0.0, 0.25, 0.75, 1.0], [5.0, 15.0, -5.0, 5.0], "cubic"),
+        Channel(hat, "translation", 1, [0.0, 0.5, 1.0], [12.0, 16.0, 12.0], ["cubic", "constant", "linear"]),
+        Channel(body.mesh, "bulge", 0, [0.0, 1.0], [0.0, 1.5]),
+    ], fps=24)  # fmt: skip
+    idle = Animation("idle", [Channel(head, "rotation", 1, [0.0, 2.0], [0.0, 40.0])], fps=24)
+    scene.animations = [walk, idle]
+    return scene
+
+
+def test_write_animation(blender, tmp_path):
+    scene = animated_rig()
+    sceneport.save(scene, tmp_path / "walk.blend", blender=blender)
+    frames = [0, 5, 7, 12, 17, 24]
+    result = run_in_blender("inspect_blend", {"path": str(tmp_path / "walk.blend"), "frames": frames}, blender=blender)
+    assert result["scene"] == {"fps": 24.0, "frame_range": (0, 24)}
+    actions = {a["name"]: a for a in result["actions"]}
+    assert (actions["walk"]["fake_user"], actions["idle"]["fake_user"]) == (False, True)
+    assert set(actions["walk"]["slots"]) == {"Rig", "Hat", "Key"}  # armature, empty and shape keys (Body's Key)
+    assert 'key_blocks["bulge"].value' in actions["walk"]["fcurves"]
+
+    clip = scene.animations[0]
+    m = np.eye(4)
+    m[:3, :3] = 0.01 * basis_matrix(scene, "+Z", "-Y", "+X")
+    body = scene.find("Body")
+    for frame in frames:
+        t = frame / 24
+        state = result["frames"][frame]
+        expected = clip.skinned_vertices(scene, body.mesh, [t])[0] @ m[:3, :3].T
+        np.testing.assert_allclose(state["Body"]["world_vertices"], expected, atol=1e-5, err_msg=f"frame {frame}")
+        hat = clip.world_matrices(scene, [t])[scene.find("Hat")][0]
+        np.testing.assert_allclose(state["Hat"]["matrix_world"], m @ hat @ np.linalg.inv(m), atol=1e-5, err_msg=f"frame {frame}")
+
+
+def test_animated_shape_keys_and_objects(blender, tmp_path):
+    """No rig: object keys and shape key weights are written key for key (cubic as Bezier, exact in between)."""
+    scene = face_scene()
+    head, mesh = scene.find("Head"), scene.find("Head").mesh
+    scene.animations = [Animation("talk", [
+        Channel(mesh, "smile", 0, [0.0, 0.5, 1.0], [0.0, 3.0, 1.0], "cubic"),
+        Channel(head, "rotation", 1, [0.0, 0.4, 1.0], [30.0, 80.0, -10.0], "cubic"),
+        Channel(head, "translation", 0, [0.0, 1.0], [0.0, 50.0], "constant"),
+    ], fps=30)]  # fmt: skip
+    sceneport.save(scene, tmp_path / "talk.blend", blender=blender)
+    frames = [0, 4, 11, 15, 22, 30]
+    result = run_in_blender("inspect_blend", {"path": str(tmp_path / "talk.blend"), "frames": frames}, blender=blender)
+    clip = scene.animations[0]
+    m = np.eye(4)
+    m[:3, :3] = 0.01 * basis_matrix(scene, "+Z", "-Y", "+X")
+    for frame in frames:
+        t = frame / 30
+        world = clip.world_matrices(scene, [t])[head][0]
+        points = clip.vertices(mesh, [t])[0] @ world[:3, :3].T + world[:3, 3]
+        np.testing.assert_allclose(result["frames"][frame]["Head"]["world_vertices"], points @ m[:3, :3].T, atol=1e-5,
+                                   err_msg=f"frame {frame}")  # fmt: skip
+
+
+# -- per-vertex animation ----------------------------------------------------------------------
+
+
+def sampled_scene() -> Scene:
+    """A centimeter Y-up scene: a waving strip (point samples that move) under a moved parent, and a strip whose
+    samples never leave its rest points."""
+    from sceneport.scene import PointSamples
+
+    vertices = np.array([[x, y, 0.0] for y in (0, 10) for x in (0, 10, 20)])
+    faces = [0, 1, 4, 3, 1, 2, 5, 4]
+    wave, still = Mesh("wave", vertices, [4, 4], faces), Mesh("still", vertices, [4, 4], faces)
+    times = np.arange(13) / 12
+    bend = np.zeros((13, 6, 3))
+    bend[:, [2, 5], 2] = 8 * np.sin(2 * np.pi * times)[:, None]
+    parent = Node("Parent", Transform(translation=[30, 0, 0], rotation=[0, 20, 0]), children=[Node("Wave", mesh=wave)])
+    scene = Scene(nodes=[parent, Node("Still", mesh=still)], meters_per_unit=0.01)
+    scene.animations = [Animation("wave", [], fps=12, point_samples=[
+        PointSamples(wave, times, vertices[None] + bend), PointSamples(still, times, np.repeat(vertices[None], 13, 0))])]  # fmt: skip
+    return scene
+
+
+def test_point_samples_use_a_mesh_sequence_cache(blender, tmp_path):
+    import shutil
+
+    scene = sampled_scene()
+    sceneport.save(scene, tmp_path / "out" / "wave.blend", blender=blender)
+    assert sorted(p.name for p in (tmp_path / "out").iterdir()) == ["wave.blend", "wave_cache.usdc"]
+    shutil.copytree(tmp_path / "out", tmp_path / "moved")  # the pair moves together: the cache path is relative
+    frames = [0, 2, 3, 7, 12]
+    result = run_in_blender("inspect_blend", {"path": str(tmp_path / "moved" / "wave.blend"), "frames": frames}, blender=blender)
+    assert result["cache_files"] == ["//wave_cache.usdc"]
+    written = {o["name"]: o for o in result["objects"]}
+    assert written["Wave"]["modifiers"] == [("MESH_SEQUENCE_CACHE", None)] and written["Still"]["modifiers"] == []
+    clip = scene.animations[0]
+    m = 0.01 * basis_matrix(scene, "+Z", "-Y", "+X")
+    wave = scene.find("Wave")
+    for frame in frames:
+        t = frame / 12
+        world = clip.world_matrices(scene, [t])[wave][0]
+        expected = (clip.vertices(wave.mesh, [t])[0] @ world[:3, :3].T + world[:3, 3]) @ m.T
+        np.testing.assert_allclose(result["frames"][frame]["Wave"]["world_vertices"], expected, atol=1e-5, err_msg=f"frame {frame}")
+
+
+def test_spring_run_cycle(blender, sample, tmp_path):
+    scene = sceneport.load(sample("spring_runcycle"))
+    with pytest.warns(UserWarning):  # materials, cameras aren't written yet
+        sceneport.save(scene, tmp_path / "spring.blend", blender=blender)
+    clip = scene.animations[0]
+    start, end = (round(t * clip.fps) for t in clip.time_range())
+    frames = [start, (start + end) // 2, end]
+    result = run_in_blender("inspect_blend", {"path": str(tmp_path / "spring.blend"), "frames": frames}, blender=blender)
+    cached = [o for o in result["objects"] if ("MESH_SEQUENCE_CACHE", None) in o.get("modifiers", [])]
+    assert len(cached) == 29  # only the meshes whose samples move
+    m = scene.meters_per_unit * basis_matrix(scene, "+Z", "-Y", "+X")
+    by_name = {}
+    for node, _ in scene.walk():
+        by_name.setdefault(node.name, node)
+    checked = 0
+    for obj in cached[:6]:
+        node = by_name.get(obj["name"])
+        if node is None or node.mesh is None:
+            continue
+        for frame in frames:
+            t = frame / clip.fps
+            world = clip.world_matrices(scene, [t])[node][0]
+            expected = (clip.vertices(node.mesh, [t])[0] @ world[:3, :3].T + world[:3, 3]) @ m.T
+            np.testing.assert_allclose(result["frames"][frame][obj["name"]]["world_vertices"], expected, atol=1e-5,
+                                       err_msg=f"{obj['name']} frame {frame}")  # fmt: skip
+        checked += 1
+    assert checked >= 3

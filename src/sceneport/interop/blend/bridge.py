@@ -49,7 +49,9 @@ def inspect_blend(payload: dict) -> dict:
     normals, UV maps, shape keys (points, value, slider range), vertex groups, modifiers and evaluated
     world-space points (shape keys and armatures applied); for armatures their bones (parent, length,
     rest matrix and posed matrix, in armature space). Returns {"objects": [...], "collections": the scene
-    collection's tree (name, objects, hide_render, hide_viewport, color_tag, children)}."""
+    collection's tree (name, objects, hide_render, hide_viewport, color_tag, children), "scene": fps and
+    frame range, "actions": names, fake users, slots and F-curve paths, "frames": per frame in
+    payload["frames"], each object's world matrix and (meshes) evaluated world points}."""
     import bpy
     import numpy as np
 
@@ -103,7 +105,36 @@ def inspect_blend(payload: dict) -> dict:
                 "hide_viewport": c.hide_viewport, "color_tag": c.color_tag,
                 "children": [collection(child) for child in c.children]}  # fmt: skip
 
-    return {"objects": out, "collections": collection(bpy.context.scene.collection)}
+    scene = bpy.context.scene
+    frames = {}
+    for frame in payload.get("frames", []):
+        scene.frame_set(int(frame))
+        depsgraph = bpy.context.evaluated_depsgraph_get()
+        state = {}
+        for obj in bpy.data.objects:
+            world = np.array(obj.matrix_world)
+            entry = {"matrix_world": world}
+            if obj.type == "MESH":
+                evaluated = obj.evaluated_get(depsgraph).to_mesh()
+                entry["world_vertices"] = get(evaluated.vertices, "co", 3) @ world[:3, :3].T + world[:3, 3]
+                obj.evaluated_get(depsgraph).to_mesh_clear()
+            state[obj.name] = entry
+        frames[frame] = state
+    actions = [
+        {"name": a.name, "fake_user": a.use_fake_user, "frame_range": tuple(a.frame_range),
+         "slots": [s.name_display for s in a.slots],
+         "fcurves": sorted({f.data_path for layer in a.layers for strip in layer.strips for bag in strip.channelbags
+                            for f in bag.fcurves})}
+        for a in bpy.data.actions
+    ]  # fmt: skip
+    return {
+        "objects": out,
+        "collections": collection(scene.collection),
+        "scene": {"fps": scene.render.fps / scene.render.fps_base, "frame_range": (scene.frame_start, scene.frame_end)},
+        "actions": actions,
+        "cache_files": [c.filepath for c in bpy.data.cache_files],
+        "frames": frames,
+    }
 
 
 ACTIONS = {"ping": ping, "write_blend": write_blend, "inspect_blend": inspect_blend}

@@ -520,4 +520,33 @@ future changes can keep them consistent (or revisit them deliberately).
   joint are parented to its bone, with a parent inverse cancelling Blender's
   offset to the bone's tail. A skin spanning several armatures deforms with the
   first one only (warned).
-- Materials, cameras, lights and animation aren't written yet (warned).
+- **Animation**: one Action per clip, with a slot per animated datablock
+  (object, armature object, shape key set: Blender 5's slotted actions). The
+  first clip is assigned to them and sets the scene's fps (`fps / fps_base` for
+  fractional rates), frame range and current frame; the others keep a fake
+  user. Frame = seconds x fps, so time 0 is frame 0 (as Blender's USD importer;
+  its FBX importer starts at 1). Object transform and shape key weight keys are
+  written as they are, `change_basis` having mapped them one-to-one (Euler in
+  radians; `orientation` as `rotation_quaternion` with the object's rotation
+  mode set to quaternion); constant / linear keys map directly and cubic ones
+  get FREE Bezier handles a third of the way along each segment on sceneport's
+  automatic slopes, which reproduces its Hermite curve exactly. Bones are
+  sampled on every frame and key: their Blender values are relative to the
+  rest (bind) pose, P(t) = A(t)^-1 @ J(t) @ B^-1 @ A @ R, so keys don't carry
+  over one-to-one. A skinned mesh moved under its armature has its transform
+  channels baked in its new parent's space.
+- **Per-vertex animation** (point samples, the first clip's) can't live in a
+  .blend: a CacheFile only references a file and can't be packed, and shape
+  keys per frame or packed Geometry Nodes bakes would be no more editable than
+  a cache. So the meshes whose samples move are written to a sidecar
+  `<name>_cache.usdc` (`blend/cache.py`: topology plus time-sampled points in
+  the prepared scene's Z-up meters, one time code per frame) and read by a Mesh
+  Sequence Cache modifier, first in the object's stack (an armature after it
+  skins the cached points), through a CacheFile referenced relative to the
+  .blend (`//name_cache.usdc`). The modifier reads vertices only, so the .blend's
+  faces, UVs and materials stay editable, and interpolates between samples.
+  Meshes whose samples never leave their rest points (exporters sample static
+  meshes too: 119 of Spring's 148) get no cache. A mesh with shape keys loses
+  their effect under the cache (warned). Making such animation editable needs a
+  rig: fitting one (skinning decomposition) is a possible later addition.
+- Materials, cameras and lights aren't written yet (warned).
