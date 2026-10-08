@@ -167,8 +167,7 @@ def test_write_armature_and_skin(blender, tmp_path):
 def test_write_human_female(blender, sample, tmp_path):
     path = sample("usdskel_examples") / "HumanFemale" / "HumanFemale.walk.usd"
     scene = sceneport.load(path)
-    with pytest.warns(UserWarning):  # materials aren't written yet
-        sceneport.save(scene, tmp_path / "human.blend", blender=blender)
+    sceneport.save(scene, tmp_path / "human.blend", blender=blender)
     clip = scene.animations[0]
     start, end = (round(t * clip.fps) for t in clip.time_range())
     frames = [start, (start + end) // 2, end]  # the walk runs from frame 101 to 129
@@ -320,8 +319,7 @@ def test_point_samples_use_a_mesh_sequence_cache(blender, tmp_path):
 
 def test_spring_run_cycle(blender, sample, tmp_path):
     scene = sceneport.load(sample("spring_runcycle"))
-    with pytest.warns(UserWarning):  # materials, cameras aren't written yet
-        sceneport.save(scene, tmp_path / "spring.blend", blender=blender)
+    sceneport.save(scene, tmp_path / "spring.blend", blender=blender)
     clip = scene.animations[0]
     start, end = (round(t * clip.fps) for t in clip.time_range())
     frames = [start, (start + end) // 2, end]

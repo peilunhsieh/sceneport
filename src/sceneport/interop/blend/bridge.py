@@ -123,6 +123,8 @@ def inspect_blend(payload: dict) -> dict:
                 for k in keys
             ]  # fmt: skip
             info["vertex_groups"] = [g.name for g in obj.vertex_groups]
+            info["material_slots"] = [(s.material.name if s.material else None, s.link) for s in obj.material_slots]
+            info["material_indices"] = get(mesh.polygons, "material_index", 1, np.int32)
             info["modifiers"] = [(m.type, getattr(m, "object", None) and m.object.name) for m in obj.modifiers]
             evaluated = obj.evaluated_get(depsgraph).to_mesh()
             points = get(evaluated.vertices, "co", 3)
@@ -174,13 +176,47 @@ def inspect_blend(payload: dict) -> dict:
         "actions": actions,
         "cache_files": [c.filepath for c in bpy.data.cache_files],
         "world": world_state(),
+        "materials": {m.name: _material_summary(m) for m in bpy.data.materials if m.node_tree is not None},
         "scene_camera": scene.camera.name if scene.camera else None,
         "render": (scene.render.resolution_x, scene.render.resolution_y),
         "frames": frames,
     }
 
 
-ACTIONS = {"ping": ping, "write_blend": write_blend, "inspect_blend": inspect_blend}
+def import_usd(payload: dict) -> None:
+    """Import payload["usd"] with Blender's own USD importer (into its default scene, which has a World for
+    dome lights) and save it as payload["path"]: a reference for comparing with sceneport's .blend writer."""
+    import bpy
+
+    bpy.ops.wm.read_factory_settings()
+    for obj in list(bpy.data.objects):  # the default cube, camera and light
+        bpy.data.objects.remove(obj)
+    bpy.ops.wm.usd_import(filepath=payload["usd"])
+    bpy.ops.wm.save_as_mainfile(filepath=payload["path"], check_existing=False)
+
+
+def _material_summary(material) -> dict:
+    """A material's nodes (type, name, settings, unlinked inputs) and links, as plain data."""
+    nodes = []
+    for node in material.node_tree.nodes:
+        entry = {"type": node.bl_idname, "name": node.name, "label": node.label}
+        for attr in ("operation", "mode", "vector_type", "space", "uv_map", "extension", "interpolation"):
+            if hasattr(node, attr):
+                entry[attr] = getattr(node, attr)
+        if node.bl_idname == "ShaderNodeTexImage" and node.image is not None:
+            entry["image"] = (node.image.filepath, node.image.colorspace_settings.name, node.image.packed_file is not None)
+        values = {}
+        for i, socket in enumerate(node.inputs):
+            if not socket.is_linked and hasattr(socket, "default_value"):
+                value = socket.default_value
+                values[f"{i}:{socket.name}"] = tuple(value) if hasattr(value, "__len__") else value
+        entry["inputs"] = values
+        nodes.append(entry)
+    links = [(l.from_node.name, l.from_socket.name, l.to_node.name, l.to_socket.name) for l in material.node_tree.links]
+    return {"render_method": material.surface_render_method, "fake_user": material.use_fake_user, "nodes": nodes, "links": links}
+
+
+ACTIONS = {"ping": ping, "write_blend": write_blend, "inspect_blend": inspect_blend, "import_usd": import_usd}
 
 
 def main(job_dir: str) -> None:

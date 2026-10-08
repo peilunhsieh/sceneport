@@ -570,4 +570,24 @@ future changes can keep them consistent (or revisit them deliberately).
   Y-up domes). A turning or brightening dome is sampled onto the Mapping and
   Background nodes. The dome node stays an empty. Note that Blender's USD
   importer only fills a World the scene already has.
-- Materials aren't written yet (warned).
+- **Materials** (`blend/materials.py`): each Material becomes a Principled
+  BSDF built from `Material.pbr()`, laid out as Blender's USD importer builds
+  UsdPreviewSurface materials (compared node for node in the tests): constants
+  on the Principled inputs (Emission Strength 1, Specular Tint for the specular
+  workflow); textures as Image Texture nodes (sRGB for colors, Non-Color for
+  data, wrap as the image extension) through a shared UV Map node and a Mapping
+  node (point type, UsdTransform2d's translation / rotation / scale); one
+  channel through Separate Color (alpha from the image's Alpha); scale / bias as
+  multiply-add nodes; normal maps through a Normal Map node (strength =
+  normal_scale), re-encoded to 0..1 when their scale / bias decode to -1..1;
+  displacement through a Displacement node; occlusion kept as an unconnected
+  image node. Opacity is coverage (Principled Alpha, blended; a threshold makes
+  a dithered cutout), as Blender's FBX and glTF importers read transparency;
+  Blender's USD importer instead reads an unthresholded opacity as glass
+  (Transmission Weight = 1 - opacity) and doesn't threshold a constant one.
+  Slots live on the mesh data (on the object where a shared mesh's users
+  differ), faces take the material indices, unused materials keep a fake user.
+  Image paths are relative to the .blend; images embedded in an FBX are packed
+  (FBX paths may be Windows-style: separators are normalized). Only the PBR
+  reading is kept: source-specific graphs (FBX Phong values, MaterialX
+  networks) aren't stored in the .blend.

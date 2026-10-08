@@ -35,8 +35,11 @@ inverse that cancels Blender's offset to the bone's tail.
 Cameras and lights become camera / light objects and the first dome light the
 World (cameras_lights.py), the first camera the scene's; their animated settings
 are F-curves on the camera / light data, and a dome's turning or brightness is
-sampled onto the World's nodes. Materials aren't written yet: skipped with a
-warning.
+sampled onto the World's nodes.
+
+Materials are Principled BSDF setups built from each material's PBR reading
+(materials.py), assigned to slots on the mesh data (on the object where a shared
+mesh's users differ), with the faces' slot indices.
 """
 
 from __future__ import annotations
@@ -54,6 +57,7 @@ from ...math import _axes, complete_rotation, quaternion_continuity, quaternion_
 from ...scene.animation import Animation, Channel, _auto_slopes
 from ...scene.types import Mesh, Node, Primvar, Scene
 from . import cameras_lights
+from .materials import MaterialWriter, assign
 from .cache import moving, write_point_cache
 from ..reframe import key_times
 from .compat import Rig, pose_tracks, prepare, rigs
@@ -133,6 +137,14 @@ def scene_to_blender(
 
     for root in scene.nodes:
         build(root, None)
+    writer, first_slots = MaterialWriter(blend_dir), {}
+    for node, obj in objects.items():
+        if node.materials and obj.type == "MESH":
+            assign(obj, node.materials, writer, first_slots)
+    for material in scene.materials:  # every material, bound or not: unused ones survive saving
+        data = writer.material(material)
+        if data.users == 0:
+            data.use_fake_user = True
     cameras = [node for node in objects if node.camera is not None and objects[node].type == "CAMERA"]
     if cameras:
         cameras_lights.use_camera(objects[cameras[0]], cameras[0].camera)
@@ -471,6 +483,8 @@ def _mesh(mesh: Mesh) -> bpy.types.Mesh:
     data.loops.foreach_set("vertex_index", mesh.face_vertex_indices.astype(np.int32))
     data.polygons.add(len(counts))
     data.polygons.foreach_set("loop_start", (np.cumsum(counts) - counts).astype(np.int32))  # also right with no faces
+    if mesh.material_indices is not None:
+        data.polygons.foreach_set("material_index", mesh.material_indices.astype(np.int32))
     data.update(calc_edges=True)
     if data.validate(verbose=False, clean_customdata=False):
         warnings.warn(f"mesh {mesh.name!r}: Blender removed invalid geometry (e.g. repeated corners or faces)")
@@ -543,7 +557,6 @@ def _warn_unsupported(scene: Scene) -> None:
     skipped = [
         what
         for what, present in (
-            ("materials", bool(scene.materials) or any(n.materials for n in nodes)),
             ("blend shape normal offsets (Blender computes shape normals)",
              any(s.normal_offsets is not None for m in scene.meshes for s in m.blend_shapes)),
         )

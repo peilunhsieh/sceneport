@@ -28,7 +28,8 @@ def save(
     So far meshes, blend shapes, joints (armatures, posed as the scene is), skins, collections and
     animation (an action per clip, the first assigned) are written; per-vertex animation goes to
     `<name>_cache.usdc` beside the .blend, read by Mesh Sequence Cache modifiers. Cameras, lights and
-    the first dome light (as the World) are written too; materials are skipped with a warning.
+    the first dome light (as the World) and materials (Principled BSDF setups from their PBR reading)
+    are written too.
     """
     payload = {"scene": scene, "path": str(Path(path).resolve())}
     run_in_blender("write_blend", payload, blender=blender, timeout=timeout)

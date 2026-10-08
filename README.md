@@ -154,7 +154,9 @@ goes to a `<name>_cache.usdc` beside the .blend, read by Mesh Sequence Cache
 modifiers (keep the two files together). Cameras and lights (with their
 animated settings) are written as Blender's USD importer would set them, the
 first camera as the scene's camera and the first dome light as the World.
-Materials are skipped with a warning. Each shape key's
+Materials become Principled BSDF setups built from their PBR reading (textures,
+UV transforms, channels, normal maps; embedded FBX images packed into the
+.blend). Each shape key's
 slider range is its blend shape's `range` (default 0..1, e.g. `(-3, 3)` for a
 morphable model's coefficients), widened where the shape's weights fall outside
 it, since Blender clamps weights to the slider. Reading `.blend` files isn't supported yet.
@@ -265,7 +267,7 @@ the repository.
 - [x] Phase 3 — materials / textures (USD graphs, FBX Phong, PBR interpretation)
 - [x] Phase 4 — skeleton / skinning (linear blend skinning), FBX and USD
 - [x] Phase 5 — animation (keyframes, joints/nodes/blend shape weights), FBX and USD
-- [ ] Phase 6 — `.blend` through an installed Blender: running Blender, writing meshes, shape keys, armatures, skins, animation, cameras and lights (done); materials; reading
+- [ ] Phase 6 — `.blend` through an installed Blender: running Blender, writing meshes, shape keys, armatures, skins, animation, cameras, lights and PBR materials (done); reading
 
 ## Conventions
 
