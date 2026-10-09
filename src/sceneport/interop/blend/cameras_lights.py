@@ -15,6 +15,13 @@ through sceneport's .blend or through Blender's USD import of sceneport's USD:
   size = 2 x radius), cylinders become point lights (warned). One difference: a
   sun's angle is used as is (USD's angular diameter, as Blender's), where
   Blender's USD importer doubles it.
+- EEVEE skips a point, spot or area light beyond the distance where its power
+  falls to the scene's light threshold, sqrt(power / threshold), with power =
+  max(color) x energy x 2^exposure / 100 (eevee_light.cc), and fades it towards
+  there. Physically scaled lights (e.g. a light stage's 0.37 W lamps 1 m from
+  the subject) fall below Blender's default 0.01 and render black in EEVEE
+  while lit in Cycles, so the threshold is lowered until every such light
+  reaches 4x the scene's size (fading under 0.5%); it is never raised.
 - A dome light becomes the World: Environment Texture -> Background (strength =
   intensity x 2^exposure), oriented by a Mapping node (point type, XYZ Euler)
   set to R_default @ R^-1 for the dome's world rotation R, R_default being
@@ -191,3 +198,51 @@ def _image(asset, blend_dir: Path | None):
         except ValueError:  # another drive (Windows): keep it absolute
             pass
     return image
+
+
+REACH = 4.0  # EEVEE lights reach this many times the scene's size: their edge fade then costs under 0.5%
+
+
+def fit_eevee_light_threshold(scene=None) -> float:
+    """Lower the scene's EEVEE light threshold so no point / spot / area light is cut off within REACH x the
+    size of everything in the scene; returns the threshold (unchanged when the lights are bright enough)."""
+    scene = scene or bpy.context.scene
+    bpy.context.view_layer.update()
+    corners = []
+    for obj in scene.objects:
+        world = np.array(obj.matrix_world)
+        local = np.array([tuple(c) for c in obj.bound_box]) if obj.type == "MESH" else np.zeros((1, 3))
+        corners.append(local @ world[:3, :3].T + world[:3, 3])
+    if not corners:
+        return scene.eevee.light_threshold
+    points = np.concatenate(corners)
+    reach = REACH * max(float(np.linalg.norm(points.max(0) - points.min(0))), 1e-3)
+    threshold = scene.eevee.light_threshold
+    for obj in scene.objects:
+        if obj.type != "LIGHT" or obj.data.type == "SUN" or obj.data.use_custom_distance:
+            continue
+        power = _min_power(obj.data)
+        if power > 0.0:
+            threshold = min(threshold, power / reach**2)
+    if threshold < scene.eevee.light_threshold:
+        scene.eevee.light_threshold = max(threshold, 1e-16)  # EEVEE's own floor
+    return scene.eevee.light_threshold
+
+
+def _min_power(light) -> float:
+    """EEVEE's influence power of `light` (max color x energy x 2^exposure / 100 x the strongest surface factor),
+    at its dimmest animated energy / exposure."""
+    color = np.array(light.color) * (np.array(light.temperature_color) if light.use_temperature else 1.0)
+    energy, exposure = _min_keyed(light, "energy", light.energy), _min_keyed(light, "exposure", light.exposure)
+    factor = max(light.diffuse_factor, light.specular_factor, getattr(light, "transmission_factor", 1.0))
+    return float(color.max()) * abs(energy) * 2.0**exposure / 100.0 * factor
+
+
+def _min_keyed(datablock, path: str, value: float) -> float:
+    data = datablock.animation_data
+    if data is None or data.action is None:
+        return value
+    keys = [k.co[1] for layer in data.action.layers for strip in layer.strips for bag in strip.channelbags
+            if bag.slot == data.action_slot for curve in bag.fcurves if curve.data_path == path
+            for k in curve.keyframe_points]  # fmt: skip
+    return min([value, *keys])

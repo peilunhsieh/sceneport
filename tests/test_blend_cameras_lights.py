@@ -8,7 +8,7 @@ import pytest
 import sceneport
 from sceneport.interop.blend import run_in_blender
 from sceneport.interop.reframe import basis_matrix
-from sceneport.scene import Animation, AssetPath, Camera, Channel, Mesh, Node, Scene, Transform
+from sceneport.scene import Animation, AssetPath, Camera, Channel, Light, Mesh, Node, Scene, Transform
 from test_light import LIGHTS, lights_scene
 
 
@@ -150,3 +150,50 @@ def test_turning_dome(blender, sample, tmp_path):
         state = result["frames"][frame]["_world"]
         np.testing.assert_allclose(euler_xyz_matrix(state["mapping"][1]), euler_xyz_matrix(np.radians([0, 0, z])), atol=1e-5)
         assert state["strength"] == pytest.approx(strength, rel=1e-5)
+
+
+def eevee_reach(light: dict, threshold: float) -> float:
+    """How far EEVEE lets a light reach: sqrt(power / threshold), power = max color x energy x 2^exposure / 100."""
+    return math.sqrt(max(light["color"]) * light["energy"] * 2.0 ** light["exposure"] / 100.0 / threshold)
+
+
+def stage_scene(intensity: float) -> Scene:
+    """Spot lights 1 m around a small card at the center, aimed at it (a light stage in miniature)."""
+    from sceneport.math import euler_from_matrix
+
+    card = Node("Card", mesh=Mesh("card", [[-0.05, 0, -0.05], [0.05, 0, -0.05], [0.05, 0, 0.05], [-0.05, 0, 0.05]], [4], [0, 1, 2, 3]))
+    scene = Scene(nodes=[card], up_axis="+Z", front_axis="-Y")
+    for i, d in enumerate([(0, -1, 0), (0.6, -0.8, 0), (-0.6, -0.8, 0), (0, -0.6, 0.8)]):
+        z = np.array(d, dtype=float)
+        x = np.cross([0, 0, 1], z)
+        x /= np.linalg.norm(x)
+        rotation = euler_from_matrix(np.column_stack([x, np.cross(z, x), z]), "XYZ")
+        light = Light("sphere", intensity=intensity, radius=0.025, cone_angle=17.0, cone_softness=1.0, normalize=True)
+        scene.add(Node(f"Lamp{i}", Transform(translation=z, rotation=rotation), light=light))
+    return scene
+
+
+def test_dim_lights_lower_the_eevee_threshold(blender, tmp_path):
+    """Physically scaled lamps (0.37 W, 1 m away) fall below EEVEE's default threshold (0.01) and would render
+    black: the threshold is lowered until every light reaches 4x the scene's size."""
+    sceneport.save(stage_scene(0.117), tmp_path / "dim.blend", blender=blender)
+    result = inspect(blender, tmp_path / "dim.blend")
+    threshold = result["scene"]["eevee_light_threshold"]
+    assert threshold < 0.01
+    lights = [o for o in result["objects"] if o["type"] == "LIGHT"]
+    corners = np.array([o["matrix_world"][:3, 3] for o in result["objects"]] + [[-0.05, 0, -0.05], [0.05, 0, 0.05]])
+    size = np.linalg.norm(corners.max(0) - corners.min(0))
+    for light in lights:
+        assert eevee_reach(light["light"], threshold) == pytest.approx(4 * size, rel=1e-3) or \
+            eevee_reach(light["light"], threshold) > 4 * size  # fmt: skip
+    rendered = run_in_blender("render_eevee_center", {"path": str(tmp_path / "dim.blend")}, blender=blender)
+    # As physics has it (black at the default threshold): each lamp gives P / (4 pi) W/m^2 at 1 m on its axis,
+    # times the cosine to the card's normal; Blender's default surface (albedo 0.8) returns albedo / pi of it.
+    watts = lights[0]["light"]["energy"]
+    cosines = sum(max(0.0, -o["matrix_world"][1, 3]) for o in lights)  # the card faces -Y; lamps are 1 m out
+    assert rendered == pytest.approx(0.8 / math.pi * watts / (4 * math.pi) * cosines, rel=0.1)
+
+
+def test_bright_lights_keep_the_default_threshold(blender, tmp_path):
+    sceneport.save(stage_scene(100.0), tmp_path / "bright.blend", blender=blender)
+    assert inspect(blender, tmp_path / "bright.blend")["scene"]["eevee_light_threshold"] == pytest.approx(0.01)

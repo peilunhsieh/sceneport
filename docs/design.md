@@ -562,6 +562,17 @@ future changes can keep them consistent (or revisit them deliberately).
   animated settings are F-curves on the camera / light data (`lens`, `energy`,
   `spot_size`, ...; shift keys divide by the sensor width, on the offset's keys
   if the width is animated too).
+- **EEVEE's light threshold is fitted.** EEVEE cuts a point / spot / area light
+  off where its power falls to the scene's light threshold, at sqrt(power /
+  threshold) with power = max(color) x energy x 2^exposure / 100 (Blender's
+  `eevee_light.cc`), and fades it towards there. Physically scaled lights, e.g.
+  a light stage's 0.37 W lamps (20 lux at 1 m) 1 m from the subject, reach only
+  0.6 m at Blender's default 0.01, so the scene renders black in EEVEE while
+  Cycles (which has no threshold) lights it. After writing, the threshold is
+  lowered until every such light (at its dimmest animated energy) reaches 4x
+  the size of everything in the scene, where the fade costs under 0.5%; it is
+  never raised, so ordinary lights leave Blender's default. Lights with a
+  custom distance and suns are left alone.
 - **The first dome light becomes the World** (Blender has one): Environment
   Texture -> Background with strength = intensity x 2^exposure, through a
   Mapping node (point, XYZ Euler) set to R_default @ R^-1, R the dome's world

@@ -172,7 +172,8 @@ def inspect_blend(payload: dict) -> dict:
     return {
         "objects": out,
         "collections": collection(scene.collection),
-        "scene": {"fps": scene.render.fps / scene.render.fps_base, "frame_range": (scene.frame_start, scene.frame_end)},
+        "scene": {"fps": scene.render.fps / scene.render.fps_base, "frame_range": (scene.frame_start, scene.frame_end),
+                  "eevee_light_threshold": scene.eevee.light_threshold},
         "actions": actions,
         "cache_files": [c.filepath for c in bpy.data.cache_files],
         "world": world_state(),
@@ -216,7 +217,37 @@ def _material_summary(material) -> dict:
     return {"render_method": material.surface_render_method, "fake_user": material.use_fake_user, "nodes": nodes, "links": links}
 
 
-ACTIONS = {"ping": ping, "write_blend": write_blend, "inspect_blend": inspect_blend, "import_usd": import_usd}
+def render_eevee_center(payload: dict) -> float:
+    """Render payload["path"] with EEVEE from the front, looking at the origin (a diagnostic): the mean
+    linear value of the image's center, so tests can tell a lit subject from a black one."""
+    import math
+
+    import bpy
+    import numpy as np
+
+    bpy.ops.wm.open_mainfile(filepath=payload["path"], load_ui=False)
+    scene = bpy.context.scene
+    camera = bpy.data.objects.new("_probe", bpy.data.cameras.new("_probe"))
+    scene.collection.objects.link(camera)
+    camera.location, camera.rotation_euler = (0.0, -0.6, 0.0), (math.radians(90.0), 0.0, 0.0)
+    camera.data.lens = 200.0
+    scene.camera = camera
+    scene.render.engine = "BLENDER_EEVEE"
+    scene.render.resolution_x = scene.render.resolution_y = 32
+    scene.view_settings.view_transform = "Standard"
+    scene.render.image_settings.file_format = "OPEN_EXR"
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        scene.render.filepath = tmp + "/probe.exr"
+        bpy.ops.render.render(write_still=True)
+        image = bpy.data.images.load(scene.render.filepath)
+        pixels = np.array(image.pixels[:]).reshape(32, 32, 4)
+    return float(pixels[12:20, 12:20, :3].mean())
+
+
+ACTIONS = {"ping": ping, "write_blend": write_blend, "inspect_blend": inspect_blend, "import_usd": import_usd,
+           "render_eevee_center": render_eevee_center}
 
 
 def main(job_dir: str) -> None:

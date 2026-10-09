@@ -232,7 +232,7 @@ def test_write_animation(blender, tmp_path):
     sceneport.save(scene, tmp_path / "walk.blend", blender=blender)
     frames = [0, 5, 7, 12, 17, 24]
     result = run_in_blender("inspect_blend", {"path": str(tmp_path / "walk.blend"), "frames": frames}, blender=blender)
-    assert result["scene"] == {"fps": 24.0, "frame_range": (0, 24)}
+    assert (result["scene"]["fps"], result["scene"]["frame_range"]) == (24.0, (0, 24))
     actions = {a["name"]: a for a in result["actions"]}
     assert (actions["walk"]["fake_user"], actions["idle"]["fake_user"]) == (False, True)
     assert set(actions["walk"]["slots"]) == {"Rig", "Hat", "Key"}  # armature, empty and shape keys (Body's Key)

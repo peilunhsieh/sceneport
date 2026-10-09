@@ -174,6 +174,7 @@ def scene_to_blender(
     for index, clip in enumerate(scene.animations):
         _action(scene, clip, index == 0, objects, meshes, layout, rig_objects, bone_names, domes[:1])
     _point_caches(scene, objects, cache_path, blend_path)
+    cameras_lights.fit_eevee_light_threshold()
     return objects
 
 
