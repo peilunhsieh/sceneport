@@ -569,7 +569,8 @@ future changes can keep them consistent (or revisit them deliberately).
   a light stage's 0.37 W lamps (20 lux at 1 m) 1 m from the subject, reach only
   0.6 m at Blender's default 0.01, so the scene renders black in EEVEE while
   Cycles (which has no threshold) lights it. After writing, the threshold is
-  lowered until every such light (at its dimmest animated energy) reaches 4x
+  lowered until every such light (at its dimmest non-zero animated energy:
+  a light that's off needs no reach) reaches 4x
   the size of everything in the scene, where the fade costs under 0.5%; it is
   never raised, so ordinary lights leave Blender's default. Lights with a
   custom distance and suns are left alone.

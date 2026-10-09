@@ -197,3 +197,19 @@ def test_dim_lights_lower_the_eevee_threshold(blender, tmp_path):
 def test_bright_lights_keep_the_default_threshold(blender, tmp_path):
     sceneport.save(stage_scene(100.0), tmp_path / "bright.blend", blender=blender)
     assert inspect(blender, tmp_path / "bright.blend")["scene"]["eevee_light_threshold"] == pytest.approx(0.01)
+
+
+def test_lights_switched_off_still_get_their_reach(blender, tmp_path):
+    """A light that's off part of the time (energy 0, e.g. one light at a time) needs its reach when it's on:
+    its dimmest non-zero energy sets the threshold, not the 0."""
+    scene = stage_scene(0.117)
+    lamps = [n for n, _ in scene.walk() if n.light is not None]
+    scene.animations = [Animation("olat", [
+        Channel(lamp, "light:intensity", 0, [0.0, i / 24, (i + 1) / 24], [0.0, 0.117, 0.0], "constant")
+        for i, lamp in enumerate(lamps)
+    ], fps=24)]  # fmt: skip
+    sceneport.save(scene, tmp_path / "olat.blend", blender=blender)
+    lit = inspect(blender, tmp_path / "olat.blend")
+    always_on = tmp_path / "on.blend"
+    sceneport.save(stage_scene(0.117), always_on, blender=blender)
+    assert lit["scene"]["eevee_light_threshold"] == pytest.approx(inspect(blender, always_on)["scene"]["eevee_light_threshold"])

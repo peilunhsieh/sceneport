@@ -231,18 +231,21 @@ def fit_eevee_light_threshold(scene=None) -> float:
 
 def _min_power(light) -> float:
     """EEVEE's influence power of `light` (max color x energy x 2^exposure / 100 x the strongest surface factor),
-    at its dimmest animated energy / exposure."""
+    at its dimmest animated energy / exposure; frames where it is off (energy 0) don't count: it needs no reach
+    then (e.g. a light stage's one-light-at-a-time sequence keeps every light off most of the time)."""
     color = np.array(light.color) * (np.array(light.temperature_color) if light.use_temperature else 1.0)
-    energy, exposure = _min_keyed(light, "energy", light.energy), _min_keyed(light, "exposure", light.exposure)
+    energy = _min_keyed(light, "energy", light.energy, nonzero=True)
+    exposure = _min_keyed(light, "exposure", light.exposure)
     factor = max(light.diffuse_factor, light.specular_factor, getattr(light, "transmission_factor", 1.0))
     return float(color.max()) * abs(energy) * 2.0**exposure / 100.0 * factor
 
 
-def _min_keyed(datablock, path: str, value: float) -> float:
+def _min_keyed(datablock, path: str, value: float, nonzero: bool = False) -> float:
+    """The smallest of `value` and the keys animating `path` (`nonzero`: ignoring zeros; 0 if all are)."""
     data = datablock.animation_data
-    if data is None or data.action is None:
-        return value
-    keys = [k.co[1] for layer in data.action.layers for strip in layer.strips for bag in strip.channelbags
-            if bag.slot == data.action_slot for curve in bag.fcurves if curve.data_path == path
-            for k in curve.keyframe_points]  # fmt: skip
-    return min([value, *keys])
+    keys = [] if data is None or data.action is None else [
+        k.co[1] for layer in data.action.layers for strip in layer.strips for bag in strip.channelbags
+        if bag.slot == data.action_slot for curve in bag.fcurves if curve.data_path == path for k in curve.keyframe_points
+    ]  # fmt: skip
+    values = [v for v in (value, *keys) if not nonzero or v != 0.0]
+    return min(values, default=0.0)
