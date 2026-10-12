@@ -167,7 +167,7 @@ up, meters), so objects carry no extra rotation.
 | Joints and skins | One armature per joint tree, bones resting in the bind pose and posed as the scene is; vertex groups and an Armature modifier, with the mesh a child of its armature |
 | Animation | One action per clip: the first is assigned and sets the scene's fps and frame range, the others are kept with a fake user (switch in Blender) |
 | Per-vertex animation | A `<name>_cache.usdc` beside the .blend, read by Mesh Sequence Cache modifiers: keep the two files together |
-| Cameras and lights | Cameras and lights with their animated settings; the first camera is the scene's camera, the first dome light the World |
+| Cameras and lights | Cameras and lights with their animated settings; the first camera is the scene's camera (its `exposure`, in stops, is the view's exposure: Blender has none per camera), the first dome light the World |
 | Materials | Principled BSDF setups built from each material's PBR reading (textures, UV transforms, channels, normal maps); images embedded in an FBX are packed into the .blend |
 | Collections | Blender collections, nested the same way |
 | `scene.extras["blender"]["texts"]` | Text datablocks (`{name: source}`): scripts saved in the file, run from Blender's Text Editor (Alt+P); nothing runs by itself |

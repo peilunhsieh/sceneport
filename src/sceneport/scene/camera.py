@@ -30,6 +30,7 @@ class Camera:
     far: float = 1000.0
     focus_distance: float | None = None  # scene units; None = not set
     f_stop: float | None = None  # None = no depth of field
+    exposure: float = 0.0  # stops (log2): the image is brightened by 2^exposure (USD's camera exposure)
     # Format-specific data kept for round trips, keyed by format.
     extras: dict[str, Any] = field(default_factory=dict)
 

@@ -10,6 +10,7 @@ perspective, 1 orthographic). FBX cameras look down their node's +X axis; the
 from __future__ import annotations
 
 import math
+import warnings
 
 from ...scene.camera import Camera
 from ...scene.types import Node
@@ -65,6 +66,8 @@ def read_camera(doc: FBXDocument, model: FBXObject) -> Camera | None:
 def write_camera(doc: FBXDocument, node: Node) -> FBXObject:
     """The NodeAttribute of a camera node, laid out as Blender writes it."""
     camera = node.camera
+    if camera.exposure != 0.0:
+        warnings.warn(f"camera {node.name!r}: FBX has no camera exposure; its {camera.exposure:+g} stops aren't written")
     width, height = camera.horizontal_aperture / MM_PER_INCH, camera.vertical_aperture / MM_PER_INCH
     props = Properties70()
     props.set("CameraProjectionType", "enum", 1 if camera.projection == "orthographic" else 0)

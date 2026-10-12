@@ -2,7 +2,7 @@
 
 import numpy as np
 import pytest
-from pxr import UsdGeom
+from pxr import Usd, UsdGeom
 
 from sceneport.interop.fbx import document_from_scene, scene_from_document
 from sceneport.interop.fbx.binary import dumps, loads
@@ -84,3 +84,33 @@ def test_fbx_camera_looks_down_x():
     np.testing.assert_allclose(file_world[:3, 0], -expected[:3, 2], atol=1e-9)  # FBX +X = our -Z
     np.testing.assert_allclose(file_world[:3, 1], expected[:3, 1], atol=1e-9)  # up stays up
     assert raw.find("Cam").camera is not None
+
+
+# -- exposure -----------------------------------------------------------------------------------
+
+from sceneport.interop.usd import scene_from_stage as _from_stage  # noqa: E402
+
+
+def exposed_scene() -> Scene:
+    cam = Node("Cam", Transform(translation=[0, 0, 5]), camera=Camera(**LENS, exposure=2.0))
+    scene = Scene(nodes=[cam])
+    scene.animations = [Animation("expose", [Channel(cam, "camera:exposure", 0, [0.0, 1.0], [2.0, -1.0])], fps=24)]
+    return scene
+
+
+def test_usd_camera_exposure():
+    scene = exposed_scene()
+    stage = stage_from_scene(scene)
+    attr = UsdGeom.Camera(stage.GetDefaultPrim()).GetExposureAttr()
+    assert attr.Get(Usd.TimeCode.Default()) == pytest.approx(2.0) and attr.GetNumTimeSamples() == 25
+    back = _from_stage(stage)
+    assert back.find("Cam").camera.exposure == pytest.approx(2.0)
+    values = back.animations[0].attribute_values(back.find("Cam"), "camera", [0.0, 0.5, 1.0])["exposure"]
+    np.testing.assert_allclose(values, [2.0, 0.5, -1.0], atol=1e-6)
+    assert _from_stage(stage_from_scene(Scene(nodes=[Node("C", camera=Camera())]))).find("C").camera.exposure == 0.0
+
+
+def test_fbx_has_no_camera_exposure():
+    scene = exposed_scene()
+    with pytest.warns(UserWarning, match="no camera exposure"):
+        document_from_scene(scene)

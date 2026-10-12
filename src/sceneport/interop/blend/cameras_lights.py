@@ -3,6 +3,9 @@
 Values follow Blender's own USD importer, so a scene reaches Blender the same way
 through sceneport's .blend or through Blender's USD import of sceneport's USD:
 
+- Exposure: Blender has none per camera; the scene camera's exposure (stops)
+  is the view's exposure (Color Management), keyed on the scene when animated.
+  Other cameras with another exposure are warned about.
 - Cameras: sensor width / height from the apertures with a horizontal sensor fit,
   shift = offset / sensor width, clipping, depth of field only when an f-stop is
   set; orthographic view width (the horizontal aperture, in mm here meaning
@@ -94,9 +97,11 @@ def camera_data(camera: Camera, name: str):
 
 
 def use_camera(obj, camera: Camera) -> None:
-    """Make `obj` the scene's camera, with the render height giving the film's aspect."""
+    """Make `obj` the scene's camera, with the render height giving the film's aspect and the view's exposure
+    (Color Management) its exposure: Blender has no exposure per camera."""
     scene = bpy.context.scene
     scene.camera = obj
+    scene.view_settings.exposure = camera.exposure
     scene.render.resolution_x = RENDER_WIDTH
     scene.render.resolution_y = max(1, round(RENDER_WIDTH * camera.vertical_aperture / camera.horizontal_aperture))
     scene.render.pixel_aspect_x = scene.render.pixel_aspect_y = 1.0

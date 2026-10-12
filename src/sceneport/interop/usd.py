@@ -832,7 +832,7 @@ CAMERA_ATTRIBUTES = {
     "focal_length": ("focalLength", "lens"), "horizontal_aperture": ("horizontalAperture", "lens"),
     "vertical_aperture": ("verticalAperture", "lens"), "horizontal_aperture_offset": ("horizontalApertureOffset", "lens"),
     "vertical_aperture_offset": ("verticalApertureOffset", "lens"), "focus_distance": ("focusDistance", 1.0),
-    "f_stop": ("fStop", 1.0),
+    "f_stop": ("fStop", 1.0), "exposure": ("exposure", 1.0),
 }  # fmt: skip  (near / far share clippingRange)
 LIGHT_ATTRIBUTES = {
     "intensity": "inputs:intensity", "exposure": "inputs:exposure", "color": "inputs:color",
@@ -922,6 +922,8 @@ def _write_camera(usd_camera: UsdGeom.Camera, camera: Camera, meters_per_unit: f
         usd_camera.CreateFocusDistanceAttr(camera.focus_distance)
     if camera.f_stop is not None:
         usd_camera.CreateFStopAttr(camera.f_stop)
+    if camera.exposure != 0.0:
+        usd_camera.CreateExposureAttr(camera.exposure)
 
 
 # A DomeLight_1 whose image pole is Z, turned to sceneport's +Y pole: a 90 degree turn about X (+Y -> +Z).
@@ -1043,6 +1045,7 @@ def _read_camera(prim: Usd.Prim, meters_per_unit: float) -> Camera:
     near, far = _static_value(usd_camera.GetClippingRangeAttr())
     focus = _static_value(usd_camera.GetFocusDistanceAttr())
     f_stop = _static_value(usd_camera.GetFStopAttr())
+    exposure = _static_value(usd_camera.GetExposureAttr())
     return Camera(
         projection=str(_static_value(usd_camera.GetProjectionAttr())),
         focal_length=float(_static_value(usd_camera.GetFocalLengthAttr())) * mm,
@@ -1054,6 +1057,7 @@ def _read_camera(prim: Usd.Prim, meters_per_unit: float) -> Camera:
         far=float(far),
         focus_distance=float(focus) if focus else None,  # 0 = unset
         f_stop=float(f_stop) if f_stop else None,  # 0 = no depth of field
+        exposure=float(exposure or 0.0),
     )
 
 

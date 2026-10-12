@@ -228,3 +228,16 @@ def test_unassigned_clips_count_for_the_eevee_threshold(blender, tmp_path):
     sceneport.save(dim, tmp_path / "dim.blend", blender=blender)
     assert inspect(blender, tmp_path / "two.blend")["scene"]["eevee_light_threshold"] == pytest.approx(
         inspect(blender, tmp_path / "dim.blend")["scene"]["eevee_light_threshold"], rel=1e-3)
+
+
+def test_scene_camera_exposure_is_the_view_exposure(blender, tmp_path):
+    cam = Node("Cam", Transform(translation=[0, -2, 0], rotation=[90, 0, 0]), camera=Camera(exposure=2.0))
+    other = Node("Other", Transform(translation=[2, 0, 0]), camera=Camera(exposure=0.5))
+    scene = Scene(nodes=[cam, other], up_axis="+Z", front_axis="-Y")
+    scene.animations = [Animation("expose", [Channel(cam, "camera:exposure", 0, [0.0, 1.0], [2.0, -1.0])], fps=24)]
+    with pytest.warns(UserWarning, match="one exposure for the view"):
+        sceneport.save(scene, tmp_path / "exposure.blend", blender=blender)
+    result = inspect(blender, tmp_path / "exposure.blend", frames=[0, 12, 24])
+    assert result["scene_camera"] == "Cam"
+    assert [result["frames"][f]["_exposure"] for f in (0, 12, 24)] == pytest.approx([2.0, 0.5, -1.0], abs=1e-5)
+    assert "view_settings.exposure" in result["actions"][0]["fcurves"]

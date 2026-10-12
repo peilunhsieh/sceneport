@@ -37,7 +37,7 @@ NODE_PROPERTIES = {"translation": 3, "rotation": 3, "scale": 3, "orientation": 4
 # Animatable camera and light fields (in the units of scene/camera.py and scene/light.py) -> component count.
 CAMERA_PROPERTIES = {
     "focal_length": 1, "horizontal_aperture": 1, "vertical_aperture": 1, "horizontal_aperture_offset": 1,
-    "vertical_aperture_offset": 1, "near": 1, "far": 1, "focus_distance": 1, "f_stop": 1,
+    "vertical_aperture_offset": 1, "near": 1, "far": 1, "focus_distance": 1, "f_stop": 1, "exposure": 1,
 }  # fmt: skip
 LIGHT_PROPERTIES = {
     "intensity": 1, "exposure": 1, "color": 3, "temperature": 1, "diffuse": 1, "specular": 1, "radius": 1,

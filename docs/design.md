@@ -344,6 +344,11 @@ future changes can keep them consistent (or revisit them deliberately).
   scene's bounds can be useless (e.g. a node squashed to zero scale makes
   USD's bounds ~1e38).
 
+- `Camera.exposure` (stops, log2; animatable): the image is brightened by
+  2^exposure. USD: the camera's `exposure` attribute (written when not 0).
+  FBX has none (warned). Blender has no exposure per camera: the scene camera's
+  is the view's (Color Management > Exposure), keyed on the scene when animated;
+  other cameras' exposure is warned about.
 ## Lights
 
 - `Node.light` (scene/light.py): a light on a node, placed and oriented by the

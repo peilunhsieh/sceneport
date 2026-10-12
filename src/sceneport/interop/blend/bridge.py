@@ -159,6 +159,7 @@ def inspect_blend(payload: dict) -> dict:
                 entry["light"] = settings(obj.data, light_keys)
             state[obj.name] = entry
         state["_world"] = world_state()
+        state["_exposure"] = scene.view_settings.exposure
         if scene.camera is not None and "points" in payload:
             state["_view"] = np.array([tuple(world_to_camera_view(scene, scene.camera, Vector(p))) for p in payload["points"]])
         frames[frame] = state
@@ -173,7 +174,7 @@ def inspect_blend(payload: dict) -> dict:
         "objects": out,
         "collections": collection(scene.collection),
         "scene": {"fps": scene.render.fps / scene.render.fps_base, "frame_range": (scene.frame_start, scene.frame_end),
-                  "eevee_light_threshold": scene.eevee.light_threshold},
+                  "eevee_light_threshold": scene.eevee.light_threshold, "exposure": scene.view_settings.exposure},
         "actions": actions,
         "cache_files": [c.filepath for c in bpy.data.cache_files],
         "texts": {t.name: t.as_string() for t in bpy.data.texts},

@@ -152,6 +152,10 @@ def scene_to_blender(
     cameras = [node for node in objects if node.camera is not None and objects[node].type == "CAMERA"]
     if cameras:
         cameras_lights.use_camera(objects[cameras[0]], cameras[0].camera)
+        others = [c.name for c in cameras[1:] if c.camera.exposure != cameras[0].camera.exposure]
+        if others:
+            warnings.warn(f"cameras {others[:3]}{'...' if len(others) > 3 else ''}: Blender has one exposure for the "
+                          f"view, the scene camera's ({cameras[0].name!r}); theirs isn't written")  # fmt: skip
     world_matrices = scene.world_matrices()
     if domes:
         cameras_lights.world_from_dome(domes[0].light, world_matrices[domes[0]][:3, :3], blend_dir)
@@ -299,7 +303,13 @@ def _attribute_fcurves(clip: Animation, objects: dict, bag, fps: float) -> set[s
         data = objects[channel.target].data
         if kind == "camera" and isinstance(data, bpy.types.Camera):
             camera = channel.target.camera
-            if field in ("horizontal_aperture_offset", "vertical_aperture_offset"):  # shift = offset / sensor width
+            if field == "exposure":  # the view's, for the scene camera only
+                scene = bpy.context.scene
+                if scene.camera is objects[channel.target]:
+                    _fcurve(bag(scene, "SCENE"), "view_settings.exposure", 0, channel, 1.0, fps, None)
+                else:
+                    unwritten.add("exposure of cameras other than the scene camera")
+            elif field in ("horizontal_aperture_offset", "vertical_aperture_offset"):  # shift = offset / sensor width
                 if any(c.target is channel.target and c.attribute == ("camera", "horizontal_aperture") for c in clip.channels):
                     times = channel.times  # the width moves too: divide by it on the offset's keys
                     width = clip.attribute_values(channel.target, "camera", times)["horizontal_aperture"]
