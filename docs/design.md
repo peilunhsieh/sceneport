@@ -569,11 +569,17 @@ future changes can keep them consistent (or revisit them deliberately).
   a light stage's 0.37 W lamps (20 lux at 1 m) 1 m from the subject, reach only
   0.6 m at Blender's default 0.01, so the scene renders black in EEVEE while
   Cycles (which has no threshold) lights it. After writing, the threshold is
-  lowered until every such light (at its dimmest non-zero animated energy:
-  a light that's off needs no reach) reaches 4x
+  lowered until every such light (at its dimmest non-zero animated energy in
+  any clip, assigned or kept with a fake user: a light that's off needs no reach) reaches 4x
   the size of everything in the scene, where the fade costs under 0.5%; it is
   never raised, so ordinary lights leave Blender's default. Lights with a
   custom distance and suns are left alone.
+- **Scripts:** `scene.extras["blender"]["texts"]` ({name: source}) become
+  Text datablocks, saved inside the .blend and run on demand from Blender's
+  Text Editor (Run Script, Alt+P), e.g. a script switching many lights between
+  actions (Blender assigns actions per datablock, with no control for many at
+  once). They aren't registered: Blender only auto-runs a file's scripts when
+  the user allows it, so nothing runs by itself.
 - **The first dome light becomes the World** (Blender has one): Environment
   Texture -> Background with strength = intensity x 2^exposure, through a
   Mapping node (point, XYZ Euler) set to R_default @ R^-1, R the dome's world

@@ -241,11 +241,21 @@ def _min_power(light) -> float:
 
 
 def _min_keyed(datablock, path: str, value: float, nonzero: bool = False) -> float:
-    """The smallest of `value` and the keys animating `path` (`nonzero`: ignoring zeros; 0 if all are)."""
+    """The smallest of `value` and the keys animating `path` (`nonzero`: ignoring zeros; 0 if all are), in every
+    action that has a slot for `datablock`: the assigned one, and others (e.g. later clips, kept with a fake user)
+    through their slot named after it, as the writer names slots. Switching actions then keeps the lights lit."""
     data = datablock.animation_data
-    keys = [] if data is None or data.action is None else [
-        k.co[1] for layer in data.action.layers for strip in layer.strips for bag in strip.channelbags
-        if bag.slot == data.action_slot for curve in bag.fcurves if curve.data_path == path for k in curve.keyframe_points
-    ]  # fmt: skip
+    assigned = (data.action, data.action_slot) if data is not None and data.action is not None else (None, None)
+    keys = []
+    for action in bpy.data.actions:
+        for layer in action.layers:
+            for strip in layer.strips:
+                for bag in strip.channelbags:
+                    slot = bag.slot
+                    if (action, slot) != assigned and not (
+                        slot.target_id_type == datablock.id_type and slot.name_display == datablock.name
+                    ):
+                        continue
+                    keys += [k.co[1] for curve in bag.fcurves if curve.data_path == path for k in curve.keyframe_points]
     values = [v for v in (value, *keys) if not nonzero or v != 0.0]
     return min(values, default=0.0)

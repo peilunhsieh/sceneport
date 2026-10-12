@@ -343,3 +343,13 @@ def test_spring_run_cycle(blender, sample, tmp_path):
                                        err_msg=f"{obj['name']} frame {frame}")  # fmt: skip
         checked += 1
     assert checked >= 3
+
+
+def test_texts_are_saved_in_the_blend(blender, tmp_path):
+    scene = face_scene()
+    scene.animations = []
+    source = 'import bpy\nprint("hello from the .blend")\n'
+    scene.extras["blender"] = {"texts": {"hello.py": source, "bad.py": 42}}
+    with pytest.warns(UserWarning, match="bad.py"):
+        sceneport.save(scene, tmp_path / "texts.blend", blender=blender)
+    assert run_in_blender("inspect_blend", {"path": str(tmp_path / "texts.blend")}, blender=blender)["texts"] == {"hello.py": source}

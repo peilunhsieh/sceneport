@@ -40,6 +40,10 @@ sampled onto the World's nodes.
 Materials are Principled BSDF setups built from each material's PBR reading
 (materials.py), assigned to slots on the mesh data (on the object where a shared
 mesh's users differ), with the faces' slot indices.
+
+Scripts: scene.extras["blender"]["texts"] ({name: source}) become Text datablocks,
+saved in the .blend and run on demand from Blender's Text Editor (Run Script,
+Alt+P); nothing runs by itself.
 """
 
 from __future__ import annotations
@@ -175,7 +179,19 @@ def scene_to_blender(
         _action(scene, clip, index == 0, objects, meshes, layout, rig_objects, bone_names, domes[:1])
     _point_caches(scene, objects, cache_path, blend_path)
     cameras_lights.fit_eevee_light_threshold()
+    _texts(scene)
     return objects
+
+
+def _texts(scene: Scene) -> None:
+    """scene.extras["blender"]["texts"] ({name: source}) as Text datablocks (Blender adds .001 to taken names)."""
+    for name, source in scene.extras.get("blender", {}).get("texts", {}).items():
+        if not isinstance(source, str):
+            warnings.warn(f"text {name!r}: its source isn't a string; not written")
+            continue
+        text = bpy.data.texts.new(name)
+        text.write(source)
+        text.cursor_set(0)  # opened at the top in the Text Editor
 
 
 def _point_caches(scene: Scene, objects: dict, cache_path, blend_path) -> None:

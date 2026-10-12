@@ -213,3 +213,18 @@ def test_lights_switched_off_still_get_their_reach(blender, tmp_path):
     always_on = tmp_path / "on.blend"
     sceneport.save(stage_scene(0.117), always_on, blender=blender)
     assert lit["scene"]["eevee_light_threshold"] == pytest.approx(inspect(blender, always_on)["scene"]["eevee_light_threshold"])
+
+
+def test_unassigned_clips_count_for_the_eevee_threshold(blender, tmp_path):
+    """A later clip (an action kept with a fake user) that dims the lights still sets the threshold, so switching
+    to it in Blender doesn't cull them."""
+    bright, dim = stage_scene(100.0), stage_scene(0.117)
+    lamps = [n for n, _ in bright.walk() if n.light is not None]
+    bright.animations = [
+        Animation("bright", [Channel(lamp, "light:intensity", 0, [0.0, 1.0], [100.0, 90.0]) for lamp in lamps], fps=24),
+        Animation("dim", [Channel(lamp, "light:intensity", 0, [0.0, 1.0], [0.117, 0.2]) for lamp in lamps], fps=24),
+    ]  # fmt: skip
+    sceneport.save(bright, tmp_path / "two.blend", blender=blender)
+    sceneport.save(dim, tmp_path / "dim.blend", blender=blender)
+    assert inspect(blender, tmp_path / "two.blend")["scene"]["eevee_light_threshold"] == pytest.approx(
+        inspect(blender, tmp_path / "dim.blend")["scene"]["eevee_light_threshold"], rel=1e-3)

@@ -176,6 +176,7 @@ def inspect_blend(payload: dict) -> dict:
                   "eevee_light_threshold": scene.eevee.light_threshold},
         "actions": actions,
         "cache_files": [c.filepath for c in bpy.data.cache_files],
+        "texts": {t.name: t.as_string() for t in bpy.data.texts},
         "world": world_state(),
         "materials": {m.name: _material_summary(m) for m in bpy.data.materials if m.node_tree is not None},
         "scene_camera": scene.camera.name if scene.camera else None,
