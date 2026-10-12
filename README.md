@@ -1,8 +1,9 @@
 # sceneport
 
 Lightweight 3D scene I/O in Python + numpy. Reads and writes FBX natively,
-USD through [OpenUSD](https://openusd.org) (`usd-core`), and converts to and
-from [trimesh](https://trimesh.org).
+USD through [OpenUSD](https://openusd.org) (`usd-core`), OBJ and PLY, writes
+Blender `.blend` files through an installed [Blender](https://www.blender.org),
+and converts to and from [trimesh](https://trimesh.org).
 
 At the center is a format-neutral scene model; each file format or library is
 a converter around it:
@@ -13,6 +14,7 @@ a converter around it:
 | `sceneport.interop.fbx` | Native FBX read/write |
 | `sceneport.interop.usd` | USD read/write (`.usd`, `.usda`, `.usdc`, `.usdz`) via usd-core |
 | `sceneport.interop.obj`, `sceneport.interop.ply` | OBJ (+ MTL) and PLY read/write |
+| `sceneport.interop.blend` | `.blend` writing, run inside an installed Blender 5.2+ |
 | `sceneport.interop.trimesh` | Conversion to and from trimesh |
 
 The FBX support follows Blender's
@@ -131,35 +133,56 @@ scene = sceneport.load("model.usd")  # composed stage: references, payloads, ins
 
 ### Blender
 
-`.blend` files are written by an installed Blender 5.2 or newer, run in the
-background; nothing is installed into Blender. Blender is found from
-`blender=<path>` (an executable, or the `.app` on macOS), `$SCENEPORT_BLENDER`,
-`blender` on PATH, or the newest one in the usual install locations.
+sceneport writes `.blend` files by running an installed **Blender 5.2 or newer**
+in the background, so the file is built by Blender itself. Nothing is installed
+into Blender, and there's no Python version to match: sceneport puts its own
+source on the background Blender's path for the run. Reading `.blend` files
+isn't supported yet.
 
 ```python
-sceneport.save(scene, "face.blend")   # Z-up meters, as Blender's own data
+sceneport.save(scene, "scene.blend")                  # Z-up meters, as Blender's own data
+sceneport.save(scene, "scene.blend", blender="/Applications/Blender.app")
+```
 
+Blender is found from `blender=` (an executable, or the `.app` on macOS), then
+`$SCENEPORT_BLENDER`, then `blender` on PATH, then the newest Blender 5.2+ in
+the usual install locations. Each save starts Blender, about a second plus the
+time to build the scene; errors inside Blender come back as `BlenderError` with
+Blender's traceback, and its warnings as Python warnings.
+
+```python
 from sceneport.interop.blend import find_blender, run_in_blender
 find_blender()              # Blender(path=..., version=(5, 2, 2))
 run_in_blender("ping")      # {"blender": (5, 2, 2), "python": ..., "numpy": ...}
 ```
 
-So far the node hierarchy (empties and mesh objects), meshes (faces, custom
-normals, UV maps), blend shapes (shape keys), joints (one armature per joint
-tree, bones resting in the bind pose and posed as the scene is) and skins
-(vertex groups and an Armature modifier, the mesh a child of its armature) and
-animation (one action per clip; the first is assigned and sets the scene's fps
-and frame range) are written. Per-vertex animation (e.g. a USD point cache)
-goes to a `<name>_cache.usdc` beside the .blend, read by Mesh Sequence Cache
-modifiers (keep the two files together). Cameras and lights (with their
-animated settings) are written as Blender's USD importer would set them, the
-first camera as the scene's camera and the first dome light as the World.
-Materials become Principled BSDF setups built from their PBR reading (textures,
-UV transforms, channels, normal maps; embedded FBX images packed into the
-.blend). Each shape key's
-slider range is its blend shape's `range` (default 0..1, e.g. `(-3, 3)` for a
-morphable model's coefficients), widened where the shape's weights fall outside
-it, since Blender clamps weights to the slider. Reading `.blend` files isn't supported yet.
+**What's written.** The scene is converted to Blender's own axes and units (Z
+up, meters), so objects carry no extra rotation.
+
+| Scene | Blender |
+|---|---|
+| Nodes | Empties and objects, with their parents and transforms |
+| Meshes | Meshes with custom normals, UV maps and material slots |
+| Blend shapes | Shape keys; each slider spans the shape's `range` (default 0..1, e.g. `(-3, 3)` for a morphable model's coefficients), widened to fit its weights, since Blender clamps weights to the slider |
+| Joints and skins | One armature per joint tree, bones resting in the bind pose and posed as the scene is; vertex groups and an Armature modifier, with the mesh a child of its armature |
+| Animation | One action per clip: the first is assigned and sets the scene's fps and frame range, the others are kept with a fake user (switch in Blender) |
+| Per-vertex animation | A `<name>_cache.usdc` beside the .blend, read by Mesh Sequence Cache modifiers: keep the two files together |
+| Cameras and lights | Cameras and lights with their animated settings; the first camera is the scene's camera, the first dome light the World |
+| Materials | Principled BSDF setups built from each material's PBR reading (textures, UV transforms, channels, normal maps); images embedded in an FBX are packed into the .blend |
+| Collections | Blender collections, nested the same way |
+| `scene.extras["blender"]["texts"]` | Text datablocks (`{name: source}`): scripts saved in the file, run from Blender's Text Editor (Alt+P); nothing runs by itself |
+
+**Compared with Blender's own USD importer.** Values follow what Blender's USD
+importer sets for the same scene, so a scene looks the same either way, except
+where its result would be wrong:
+
+- Shape key sliders hold every weight (the importer keeps 0..1 and clamps).
+- Opacity is coverage (Alpha), as Blender's FBX and glTF importers read
+  transparency; the USD importer reads it as glass (Transmission).
+- A sun's angle is used as is (USD's angular diameter); the importer doubles it.
+- The render size follows the scene camera's film aspect.
+- EEVEE's light threshold is lowered when dim, physically scaled lights would
+  otherwise be cut off and render black in EEVEE while Cycles lights them.
 
 ## Converting files
 
@@ -168,6 +191,7 @@ sceneport convert model.fbx model.usd   # the formats follow the extensions
 sceneport convert model.usdz model.fbx  # .fbx, .usd, .usda, .usdc, .usdz, .obj, .ply
 sceneport convert scan.ply scan.usd
 sceneport convert walk.usd walk_for_blender.usd --unmirror-joints
+sceneport convert walk.usd walk.blend     # needs Blender 5.2+ installed (see Blender below)
 ```
 
 Rigs with mirrored joints (negative scale, e.g. a right side built by mirroring
