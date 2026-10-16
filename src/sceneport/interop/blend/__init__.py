@@ -20,6 +20,7 @@ def save(
     *,
     blender: Blender | str | os.PathLike | None = None,
     timeout: float | None = None,
+    pack_images: bool = False,
 ) -> None:
     """Write `scene` as a .blend file with an installed Blender (see find_blender for `blender`).
 
@@ -31,8 +32,12 @@ def save(
     the first dome light (as the World) and materials (Principled BSDF setups from their PBR reading)
     are written too. Scripts in scene.extras["blender"]["texts"] ({name: source}) are saved as Text
     datablocks, run on demand from Blender's Text Editor.
+
+    Texture images are referenced by paths relative to the .blend; with `pack_images` the ones found on
+    disk are packed into it too (they keep those paths, where Blender's Unpack Resources puts them).
+    Images embedded in the source (FBX) are always packed.
     """
-    payload = {"scene": scene, "path": str(Path(path).resolve())}
+    payload = {"scene": scene, "path": str(Path(path).resolve()), "pack_images": pack_images}
     run_in_blender("write_blend", payload, blender=blender, timeout=timeout)
 
 

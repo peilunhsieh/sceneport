@@ -142,6 +142,7 @@ isn't supported yet.
 ```python
 sceneport.save(scene, "scene.blend")                  # Z-up meters, as Blender's own data
 sceneport.save(scene, "scene.blend", blender="/Applications/Blender.app")
+sceneport.save(scene, "scene.blend", pack_images=True)  # texture images stored inside the .blend
 ```
 
 Blender is found from `blender=` (an executable, or the `.app` on macOS), then
@@ -168,7 +169,7 @@ up, meters), so objects carry no extra rotation.
 | Animation | One action per clip: the first is assigned and sets the scene's fps and frame range, the others are kept with a fake user (switch in Blender) |
 | Per-vertex animation | A `<name>_cache.usdc` beside the .blend, read by Mesh Sequence Cache modifiers: keep the two files together |
 | Cameras and lights | Cameras and lights with their animated settings; the first camera is the scene's camera (its `exposure`, in stops, is the view's exposure: Blender has none per camera), the first dome light the World |
-| Materials | Principled BSDF setups built from each material's PBR reading (textures, UV transforms, channels, normal maps); images embedded in an FBX are packed into the .blend |
+| Materials | Principled BSDF setups built from each material's PBR reading (textures, UV transforms, channels, normal maps); images are linked by paths relative to the .blend, or packed into it with `pack_images=True`; images embedded in an FBX are always packed |
 | Collections | Blender collections, nested the same way |
 | `scene.extras["blender"]["texts"]` | Text datablocks (`{name: source}`): scripts saved in the file, run from Blender's Text Editor (Alt+P); nothing runs by itself |
 

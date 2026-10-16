@@ -160,6 +160,18 @@ def test_shared_mesh_slots(blender, tmp_path):
     np.testing.assert_array_equal(objects["A"]["material_indices"], [0, 1, 0])
 
 
+def test_pack_images(blender, tmp_path):
+    def images(name, **kwargs):
+        sceneport.save(material_scene(tmp_path), tmp_path / name, blender=blender, **kwargs)
+        materials = run_in_blender("inspect_blend", {"path": str(tmp_path / name)}, blender=blender)["materials"]
+        return {n["image"] for m in materials.values() for n in m["nodes"] if n["type"] == "ShaderNodeTexImage"}
+
+    linked, packed = images("linked.blend"), images("packed.blend", pack_images=True)
+    assert len(packed) == 4 and all(path.startswith("//tex/") and is_packed for path, _, is_packed in packed)
+    assert {(path, space) for path, space, _ in packed} == {(path, space) for path, space, _ in linked}  # same paths
+    assert not any(is_packed for _, _, is_packed in linked)  # linked by default
+
+
 def test_embedded_fbx_texture_is_packed(blender, tmp_path):
     from sceneport.interop.fbx import scene_from_document
     from sceneport.interop.fbx.binary import dumps, loads

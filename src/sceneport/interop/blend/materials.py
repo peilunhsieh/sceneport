@@ -27,7 +27,8 @@ UsdPreviewSurface materials, so both routes into Blender agree:
   Principled input and is kept as an unconnected image node.
 
 Images keep paths relative to the .blend; images embedded in the source (FBX)
-are packed into the .blend. Materials nothing uses keep a fake user.
+are packed into the .blend, and with `pack_images` the ones found on disk are
+too. Materials nothing uses keep a fake user.
 """
 
 from __future__ import annotations
@@ -48,8 +49,9 @@ COLOR_INPUTS = {"base_color", "emissive", "specular_color"}  # sRGB textures; th
 
 
 class MaterialWriter:
-    def __init__(self, blend_dir: Path | None):
+    def __init__(self, blend_dir: Path | None, pack_images: bool = False):
         self.blend_dir = blend_dir
+        self.pack_images = pack_images  # also pack images found on disk (embedded ones always are)
         self.materials: dict[int, bpy.types.Material] = {}  # id(Material) -> Blender material
         self.images: dict[tuple, bpy.types.Image] = {}  # (file or content, color space) -> image
 
@@ -218,6 +220,8 @@ class MaterialWriter:
             path = (asset.resolved or asset.path) if asset is not None else ""
             try:
                 image = bpy.data.images.load(path, check_existing=False)
+                if self.pack_images:  # packed while its path is still absolute; a missing file isn't
+                    image.pack()
             except RuntimeError:
                 warnings.warn(f"texture {path!r} not found; the material references it anyway")
                 image = bpy.data.images.new(name, 1, 1)

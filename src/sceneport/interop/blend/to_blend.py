@@ -69,23 +69,30 @@ from .compat import Rig, pose_tracks, prepare, rigs
 SLIDER_LIMIT = 10.0  # Blender's widest shape key slider range is -10..10
 
 
-def write_blend(scene: Scene, path: str) -> None:
+def write_blend(scene: Scene, path: str, *, pack_images: bool = False) -> None:
     """Replace Blender's current data with `scene` and save it to `path` (plus `<name>_cache.usdc` beside it
-    when meshes have per-vertex animation)."""
+    when meshes have per-vertex animation). `pack_images`: pack the texture images found on disk."""
     bpy.ops.wm.read_factory_settings(use_empty=True)
     target = Path(path).resolve()
-    scene_to_blender(scene, cache_path=target.with_name(f"{target.stem}_cache.usdc"), blend_path=target)
+    scene_to_blender(scene, cache_path=target.with_name(f"{target.stem}_cache.usdc"), blend_path=target,
+                     pack_images=pack_images)  # fmt: skip
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     bpy.ops.wm.save_as_mainfile(filepath=str(Path(path).resolve()), check_existing=False)
 
 
 def scene_to_blender(
-    scene: Scene, *, collection=None, cache_path: str | Path | None = None, blend_path: str | Path | None = None
+    scene: Scene,
+    *,
+    collection=None,
+    cache_path: str | Path | None = None,
+    blend_path: str | Path | None = None,
+    pack_images: bool = False,
 ) -> dict[Node, bpy.types.Object]:
     """Create objects for `scene` in `collection` (default: the current scene's) and return them by
     (prepared copy's) node. `cache_path`: the USD file to write per-vertex animation to (without it, that
     animation is skipped with a warning); it is referenced relative to `blend_path`, where the .blend
-    will be saved, when given (else to the open .blend, or absolute)."""
+    will be saved, when given (else to the open .blend, or absolute). `pack_images`: pack the texture
+    images found on disk into the .blend (embedded ones always are)."""
     _warn_unsupported(scene)
     scene = prepare(scene)
     collection = collection or bpy.context.scene.collection
@@ -141,7 +148,7 @@ def scene_to_blender(
 
     for root in scene.nodes:
         build(root, None)
-    writer, first_slots = MaterialWriter(blend_dir), {}
+    writer, first_slots = MaterialWriter(blend_dir, pack_images), {}
     for node, obj in objects.items():
         if node.materials and obj.type == "MESH":
             assign(obj, node.materials, writer, first_slots)

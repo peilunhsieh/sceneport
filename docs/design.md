@@ -611,6 +611,9 @@ future changes can keep them consistent (or revisit them deliberately).
   Slots live on the mesh data (on the object where a shared mesh's users
   differ), faces take the material indices, unused materials keep a fake user.
   Image paths are relative to the .blend; images embedded in an FBX are packed
-  (FBX paths may be Windows-style: separators are normalized). Only the PBR
+  (FBX paths may be Windows-style: separators are normalized), and
+  `pack_images=True` packs the ones found on disk as well. They keep their
+  relative paths, so Blender's Unpack Resources writes them back there; a
+  missing file can't be packed and stays a reference. Only the PBR
   reading is kept: source-specific graphs (FBX Phong values, MaterialX
   networks) aren't stored in the .blend.
