@@ -11,11 +11,13 @@ import numpy as np
 from numpy.typing import NDArray
 
 from ..scene.material import AssetPath
+from ..scene.splats import GaussianSplats
 from ..scene.types import Mesh, Node, Primvar, Scene
 
 
-def warn_dropped(scene: Scene, format_name: str, *, materials: bool = True) -> None:
-    """Warn once about scene data a geometry-only format can't hold (`materials=False`: it holds materials)."""
+def warn_dropped(scene: Scene, format_name: str, *, materials: bool = True, splats: bool = True) -> None:
+    """Warn once about scene data a geometry-only format can't hold (`materials=False`: it holds
+    materials; `splats=False`: it holds Gaussian splats)."""
     meshes = scene.meshes
     dropped = [
         what
@@ -24,7 +26,7 @@ def warn_dropped(scene: Scene, format_name: str, *, materials: bool = True) -> N
             ("skins", any(m.skin is not None for m in meshes)),
             ("animation", bool(scene.animations)),  # includes per-vertex (point sample) animation
             ("lights", any(node.light is not None for node, _ in scene.walk())),
-            ("Gaussian splats", any(node.splats is not None for node, _ in scene.walk())),
+            ("Gaussian splats", splats and any(node.splats is not None for node, _ in scene.walk())),
             ("materials", materials and (bool(scene.materials) or any(node.materials for node, _ in scene.walk()))),
         )
         if present
@@ -74,6 +76,22 @@ def mesh_in_world(scene: Scene, scale: float = 1.0) -> Iterator[tuple[Node, Mesh
             values /= np.maximum(np.linalg.norm(values, axis=1, keepdims=True), 1e-300)
             normals = Primvar(values, mesh.normals.interpolation, mesh.normals.indices)
         yield node, mesh, vertices * scale if scale != 1.0 else vertices, normals
+
+
+def splats_in_world(scene: Scene, scale: float = 1.0) -> Iterator[tuple[Node, GaussianSplats]]:
+    """(node, its splats mapped to world space, then multiplied by `scale`) for every splat node.
+    Warns when a rotation would need the view-dependent SH coefficients rotated too (they aren't)."""
+    for node, matrix in scene.world_matrices().items():
+        if node.splats is None:
+            continue
+        matrix = matrix @ node.transform.geometric_matrix()
+        matrix = np.diag([scale, scale, scale, 1.0]) @ matrix
+        linear = matrix[:3, :3]
+        uniform = abs(np.cbrt(np.linalg.det(linear)))
+        if node.splats.sh_degree > 0 and not np.allclose(linear, uniform * np.eye(3), atol=1e-9 * max(uniform, 1e-300)):
+            warnings.warn(f"{node.name!r}: its splats are rotated or skewed into world space, but their view-dependent "
+                          "(SH degree > 0) colors aren't rotated with them")  # fmt: skip
+        yield node, node.splats if np.allclose(matrix, np.eye(4)) else node.splats.transformed(matrix)
 
 
 def texture_path(

@@ -214,7 +214,8 @@ that Blender reads (splitting vertices at UV seams); the default per-corner UVs
 are lossless but only MeshLab-style readers see them; `uvs=None` leaves UVs out.
 3D Gaussian splat PLYs (the 3DGS reference layout, as written by most splatting
 tools) are read as `Node.splats`, decoded to physical scales, opacities and unit
-quaternions, with extra per-splat properties kept in `splats.attributes`.
+quaternions, with extra per-splat properties kept in `splats.attributes`; a
+scene with splats and no meshes is written back in the same layout.
 OBJ and PLY hold geometry: meshes are written in world space as currently
 posed (blend shapes at their default weights), in meters (`meters_per_unit=None`
 keeps the scene's units), with a warning about what is dropped. OBJ also reads and writes materials in MTL files, like Blender

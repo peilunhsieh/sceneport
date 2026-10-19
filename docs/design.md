@@ -408,8 +408,21 @@ future changes can keep them consistent (or revisit them deliberately).
   Two scales (2DGS) get a zero third; `red`/`green`/`blue` stand in for missing
   `f_dc`. The unused normals are dropped; every other property goes to
   `attributes`. Compressed splat formats (.splat, .spz, compressed PLY) aren't read.
-- No writer stores splats yet: each warns that they are not written, so they're
-  never dropped silently.
+- PLY writing: a scene with splats and no meshes is written in the same
+  reference layout (a PLY file holds a mesh or splats, so with meshes too the
+  splats are dropped with a warning). Splats are mapped to world space and
+  units like meshes (`GaussianSplats.transformed`): a rotation times a uniform
+  scale rotates the orientations and scales the scales; any other matrix maps
+  the covariance (A Σ Aᵀ) and re-derives the axes, largest first, so flat 2DGS
+  splats keep a zero third scale (written as two scales). SH coefficients aren't
+  rotated, with a warning when view-dependent ones (degree > 0) would need it.
+  Opacities are clipped to 1e-12..1 - 1e-12 so the logit stays finite; extra
+  attributes keep their names and numeric types. Several splat nodes are joined:
+  SH padded to the highest degree, attributes not on every node dropped with a
+  warning. Read and written back, the GaussianAvatars sample matches exactly
+  except quaternion normalization (relative error 1e-7).
+- No other writer stores splats yet: each warns that they are not written, so
+  they're never dropped silently.
 
 ## Animation
 

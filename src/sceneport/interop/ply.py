@@ -13,6 +13,11 @@ UVs (`uvs=`):
       so the vertex count and order change (with a warning).
   None: no UVs.
 Skins, blend shapes and animation can't be stored.
+A scene with Gaussian splats and no meshes is written as one 3DGS splat file
+instead (the reference layout, re-encoded from Node.splats; several splat nodes
+are joined in world space, and extra attributes are written back by name). A
+file holds one or the other: with meshes too, the splats are dropped with a
+warning.
 
 Reading: ASCII and binary (either byte order). Per-corner `texcoord` lists and
 per-vertex `s`/`t` (or `u`/`v`, `texture_u`/`texture_v`) UVs are both read;
@@ -33,7 +38,7 @@ from numpy.typing import NDArray
 
 from ..scene.splats import SH_C0, GaussianSplats
 from ..scene.types import Mesh, Node, Primvar, Scene
-from .export import mesh_in_world, unit_scale, warn_dropped
+from .export import mesh_in_world, splats_in_world, unit_scale, warn_dropped
 
 _TYPES = {
     "char": "i1", "int8": "i1", "uchar": "u1", "uint8": "u1",
@@ -41,6 +46,7 @@ _TYPES = {
     "int": "i4", "int32": "i4", "uint": "u4", "uint32": "u4",
     "float": "f4", "float32": "f4", "double": "f8", "float64": "f8",
 }  # fmt: skip
+_PLY_TYPES = {"i1": "char", "u1": "uchar", "i2": "short", "u2": "ushort", "i4": "int", "u4": "uint", "f4": "float", "f8": "double"}
 _UV_NAMES = (("s", "t"), ("u", "v"), ("texture_u", "texture_v"), ("texture_s", "texture_t"))
 
 
@@ -56,11 +62,18 @@ def save(
     uvs: str | None = "corner",
     meters_per_unit: float | None = 1.0,
 ) -> None:
-    """Write `scene` as one PLY mesh. PLY has no units: coordinates are converted to
-    `meters_per_unit` (default meters); None writes the scene's own units."""
+    """Write `scene` as one PLY mesh, or, when it has Gaussian splats and no meshes, as one 3DGS splat
+    file. PLY has no units: coordinates are converted to `meters_per_unit` (default meters); None writes
+    the scene's own units."""
     if uvs not in ("corner", "vertex", None):
         raise ValueError(f'uvs must be "corner", "vertex" or None, got {uvs!r}')
-    warn_dropped(scene, "PLY")
+    has_splats = any(node.splats is not None for node, _ in scene.walk())
+    warn_dropped(scene, "PLY", splats=False)
+    if has_splats and not scene.meshes:
+        _save_splats(scene, path, ascii=ascii, double=double, meters_per_unit=meters_per_unit)
+        return
+    if has_splats:
+        warnings.warn("a PLY file holds a mesh or Gaussian splats, not both; the splats are not written")
     parts = list(mesh_in_world(scene, unit_scale(scene, meters_per_unit)))
     if not parts:
         raise ValueError("PLY needs at least one mesh")
@@ -128,6 +141,73 @@ def save(
             _write_ascii(f, vertex_data, counts, indices, uvs)
         else:
             _write_binary(f, vertex_data, counts, indices, uvs, "<f8" if double else "<f4", _TYPES[count_type])
+
+
+def _save_splats(scene: Scene, path, *, ascii: bool, double: bool, meters_per_unit: float | None) -> None:
+    """The 3DGS reference layout: x y z, zero normals, f_dc_0..2, f_rest_* (all of red's higher-order
+    coefficients, then green's, then blue's), the logit opacity, log scales (two for flat 2DGS splats),
+    rot_0..3 (w, x, y, z), then each extra attribute under its own name and type."""
+    parts = [splats for _, splats in splats_in_world(scene, unit_scale(scene, meters_per_unit))]
+    if len(parts) > 1:
+        warnings.warn(f"PLY holds one set of splats; {len(parts)} are joined into one")
+    splats = _join_splats(parts)
+    n, rest = len(splats), splats.sh[:, 1:].transpose(0, 2, 1).reshape(len(splats), -1)  # channel by channel
+    flat = len(splats) > 0 and not splats.scales[:, 2].any()
+    opacities = np.clip(splats.opacities, 1e-12, 1.0 - 1e-12)  # keeps the logit finite
+    with np.errstate(divide="ignore"):  # a zero scale is a valid -inf log scale
+        log_scales = np.log(splats.scales[:, : 2 if flat else 3])
+    real = "double" if double else "float"
+    columns = [(a, real, splats.positions[:, i]) for i, a in enumerate("xyz")]
+    columns += [(a, real, np.zeros(n)) for a in ("nx", "ny", "nz")]
+    columns += [(f"f_dc_{i}", real, splats.sh[:, 0, i]) for i in range(3)]
+    columns += [(f"f_rest_{i}", real, rest[:, i]) for i in range(rest.shape[1])]
+    columns.append(("opacity", real, np.log(opacities) - np.log1p(-opacities)))
+    columns += [(f"scale_{i}", real, log_scales[:, i]) for i in range(log_scales.shape[1])]
+    columns += [(f"rot_{i}", real, splats.orientations[:, i]) for i in range(4)]
+    names = {name for name, _, _ in columns}
+    for name, values in splats.attributes.items():
+        if name in names or values.ndim != 1:
+            warnings.warn(f"splat attribute {name!r} {'clashes with a 3DGS property' if name in names else 'is not one value per splat'}; "
+                          "it is not written")  # fmt: skip
+            continue
+        kind = _PLY_TYPES.get(values.dtype.str.lstrip("<>|="), real)
+        columns.append((name, kind, values))
+
+    header = ["ply", f"format {'ascii' if ascii else 'binary_little_endian'} 1.0", "comment written by sceneport",
+              f"element vertex {n}", *(f"property {kind} {name}" for name, kind, _ in columns), "end_header"]  # fmt: skip
+    with open(path, "wb") as f:
+        f.write(("\n".join(header) + "\n").encode("ascii"))
+        if ascii:
+            text = [[repr(float(v)) if kind in ("float", "double") else str(int(v)) for v in values] for _, kind, values in columns]
+            f.write("".join(" ".join(row) + "\n" for row in zip(*text)).encode("ascii"))
+        else:
+            table = np.empty(n, dtype=[(name, "<" + _TYPES[kind]) for name, kind, _ in columns])
+            for name, _, values in columns:
+                table[name] = values
+            f.write(table.tobytes())
+
+
+def _join_splats(parts: list[GaussianSplats]) -> GaussianSplats:
+    """One set: SH padded with zeros to the highest degree; attributes all parts share, others dropped
+    with a warning."""
+    if len(parts) == 1:
+        return parts[0]
+    if not parts:
+        return GaussianSplats("splats", np.zeros((0, 3)), np.zeros((0, 3)))
+    size = max(p.sh.shape[1] for p in parts)
+    sh = np.concatenate([np.pad(p.sh, ((0, 0), (0, size - p.sh.shape[1]), (0, 0))) for p in parts])
+    shared = set.intersection(*(set(p.attributes) for p in parts))
+    if dropped := set().union(*(set(p.attributes) for p in parts)) - shared:
+        warnings.warn(f"splat attributes {sorted(dropped)} aren't on every joined set; they are not written")
+    return GaussianSplats(
+        parts[0].name,
+        np.concatenate([p.positions for p in parts]),
+        np.concatenate([p.scales for p in parts]),
+        np.concatenate([p.orientations for p in parts]),
+        np.concatenate([p.opacities for p in parts]),
+        sh,
+        {name: np.concatenate([p.attributes[name] for p in parts]) for name in sorted(shared)},
+    )
 
 
 def _vertex_normals(mesh: Mesh, normals: Primvar | None) -> NDArray:

@@ -86,6 +86,70 @@ def test_point_cloud_without_splat_properties_is_still_a_mesh(tmp_path):
     assert node.splats is None and node.mesh.n_vertices == 3
 
 
+def assert_same_splats(a, b, rtol=1e-6):
+    for field in ("positions", "scales", "orientations", "opacities", "sh"):
+        np.testing.assert_allclose(getattr(a, field), getattr(b, field), rtol=rtol, atol=1e-7, err_msg=field)
+    assert set(a.attributes) == set(b.attributes)
+    for name in a.attributes:
+        np.testing.assert_array_equal(a.attributes[name], b.attributes[name])
+
+
+@pytest.mark.parametrize("ascii", [False, True])
+def test_3dgs_ply_round_trip(tmp_path, ascii):
+    gaussian_ply(tmp_path / "in.ply", reference_props() | {"binding_0": np.array([7.0, 0.0, 10143.0])})
+    scene = sceneport.load(tmp_path / "in.ply")
+    sceneport.save(scene, tmp_path / "out.ply", ascii=ascii)
+    back = sceneport.load(tmp_path / "out.ply").nodes[0].splats
+    assert_same_splats(scene.nodes[0].splats, back)
+    header = (tmp_path / "out.ply").read_bytes().split(b"end_header")[0].decode()
+    names = [line.split()[-1] for line in header.splitlines() if line.startswith("property")]
+    assert names[:9] == ["x", "y", "z", "nx", "ny", "nz", "f_dc_0", "f_dc_1", "f_dc_2"]  # the reference order
+    assert names[-6:] == ["scale_2", "rot_0", "rot_1", "rot_2", "rot_3", "binding_0"]
+
+
+def test_flat_splats_keep_two_scales(tmp_path):
+    props = {k: v for k, v in reference_props(degree=1).items() if k != "scale_2"}
+    gaussian_ply(tmp_path / "in.ply", props)
+    sceneport.save(sceneport.load(tmp_path / "in.ply"), tmp_path / "out.ply")
+    header = (tmp_path / "out.ply").read_bytes().split(b"end_header")[0].decode()
+    assert "scale_1" in header and "scale_2" not in header
+    np.testing.assert_array_equal(sceneport.load(tmp_path / "out.ply").nodes[0].splats.scales[:, 2], 0)
+
+
+def covariances(splats):
+    from sceneport.math import quaternion_matrix
+
+    axes = quaternion_matrix(splats.orientations)[:, :3, :3] * splats.scales[:, None, :]
+    return axes @ axes.transpose(0, 2, 1)
+
+
+@pytest.mark.parametrize("linear", [
+    2.0 * np.array([[0, -1, 0], [1, 0, 0], [0, 0, 1]]),  # rotation x uniform scale: axes kept
+    np.array([[1.0, 0.5, 0], [0, 2, 0], [0, 0, -0.5]]),  # shear, non-uniform scale and a mirror
+])  # fmt: skip
+def test_transformed_maps_covariances(linear):
+    rng = np.random.default_rng(1)
+    q = rng.normal(size=(5, 4))
+    splats = GaussianSplats("s", rng.normal(size=(5, 3)), np.exp(rng.normal(size=(5, 3))), q / np.linalg.norm(q, axis=1)[:, None])
+    matrix = np.eye(4)
+    matrix[:3, :3], matrix[:3, 3] = linear, [1, 2, 3]
+    moved = splats.transformed(matrix)
+    np.testing.assert_allclose(moved.positions, splats.positions @ linear.T + [1, 2, 3])
+    np.testing.assert_allclose(covariances(moved), linear @ covariances(splats) @ linear.T, atol=1e-12)
+    np.testing.assert_allclose(np.linalg.norm(moved.orientations, axis=1), 1)
+
+
+def test_node_transform_and_units_applied_on_write(tmp_path):
+    splats = GaussianSplats("s", [[1.0, 0, 0]], [[0.1, 0.2, 0.3]], sh=np.zeros((1, 4, 3)))
+    rotate = sceneport.Transform(rotation=np.array([0.0, 0.0, 90.0]))
+    scene = Scene(nodes=[Node("splats", rotate, splats=splats)], meters_per_unit=0.01)  # centimeters
+    with pytest.warns(UserWarning, match="view-dependent"):
+        sceneport.save(scene, tmp_path / "out.ply")
+    back = sceneport.load(tmp_path / "out.ply").nodes[0].splats
+    np.testing.assert_allclose(back.positions, [[0, 0.01, 0]], atol=1e-9)
+    np.testing.assert_allclose(back.scales, [[0.001, 0.002, 0.003]], rtol=1e-6)
+
+
 @pytest.mark.parametrize("suffix", [".obj", ".ply", ".usda", ".fbx"])
 def test_writers_warn_instead_of_dropping_silently(tmp_path, suffix):
     triangle = sceneport.Mesh("tri", [[0, 0, 0], [1, 0, 0], [0, 1, 0]], [3], [0, 1, 2])  # OBJ and PLY need a mesh
