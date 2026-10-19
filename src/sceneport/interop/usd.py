@@ -78,7 +78,7 @@ from ..scene.camera import Camera
 from ..scene.light import Light
 from ..scene.material import AssetPath, Connection, Material, NodeGraph, Port, ShaderNode
 from ..scene.pbr import NATIVE_SURFACES, native_surface, preview_surface_nodes
-from .export import texture_path
+from .export import texture_path, warn_splats
 from .reframe import mirrored_joints, reframe, unmirror
 from .fbx.materials import inferred_fbx_type
 from ..scene.types import BlendShape, Collection, Inbetween, Mesh, Node, Primvar, Scene, Skin, Transform
@@ -133,6 +133,7 @@ def load(path: str | os.PathLike) -> Scene:
 
 def save(scene: Scene, path: str | os.PathLike, *, unmirror_joints: bool = False) -> None:
     """Write `scene` as USD (.usd, .usda, .usdc, .usdz). See stage_from_scene for `unmirror_joints`."""
+    warn_splats(scene, "USD")
     path = Path(path)
     if path.suffix.lower() == ".usdz":
         with tempfile.TemporaryDirectory() as tmp:

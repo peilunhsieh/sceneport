@@ -24,12 +24,19 @@ def warn_dropped(scene: Scene, format_name: str, *, materials: bool = True) -> N
             ("skins", any(m.skin is not None for m in meshes)),
             ("animation", bool(scene.animations)),  # includes per-vertex (point sample) animation
             ("lights", any(node.light is not None for node, _ in scene.walk())),
+            ("Gaussian splats", any(node.splats is not None for node, _ in scene.walk())),
             ("materials", materials and (bool(scene.materials) or any(node.materials for node, _ in scene.walk()))),
         )
         if present
     ]
     if dropped:
         warnings.warn(f"{format_name} can't hold {', '.join(dropped)}; they are not written (meshes are baked as posed)")
+
+
+def warn_splats(scene: Scene, format_name: str) -> None:
+    """Warn that the format's writer doesn't write Gaussian splats (yet), so they aren't dropped silently."""
+    if any(node.splats is not None for node, _ in scene.walk()):
+        warnings.warn(f"the {format_name} writer doesn't write Gaussian splats; they are not written")
 
 
 def unit_scale(scene: Scene, meters_per_unit: float | None) -> float:

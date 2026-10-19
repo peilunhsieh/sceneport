@@ -15,6 +15,7 @@ if TYPE_CHECKING:
     from .camera import Camera
     from .light import Light
     from .material import AssetPath, Material
+    from .splats import GaussianSplats
 
 # USD primvar interpolation names; see interop/fbx/layers.py for the FBX mapping modes.
 Interpolation = Literal["vertex", "faceVarying", "uniform", "constant"]
@@ -431,6 +432,7 @@ class Node:
     materials: list[Material | None] = field(default_factory=list)
     camera: Camera | None = None  # looks down the node's -Z axis; see scene/camera.py
     light: Light | None = None  # e.g. a dome (environment) light; see scene/light.py
+    splats: GaussianSplats | None = None  # 3D Gaussian splats; see scene/splats.py
     # Format-specific data kept for round trips, keyed by format, e.g. extras["fbx"].
     extras: dict[str, Any] = field(default_factory=dict)
 

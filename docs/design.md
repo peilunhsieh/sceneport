@@ -384,6 +384,25 @@ future changes can keep them consistent (or revisit them deliberately).
   only: area lights arrive as point lights.)
 - Light and camera settings are animatable: see Animation.
 
+## Gaussian splats
+
+- `Node.splats` (scene/splats.py): 3D Gaussians placed by the node, like a
+  mesh. **Physical values, not a file's encoding**: positions, per-axis scales
+  (standard deviations, scene units; a 2DGS surfel has a zero third scale), unit
+  quaternions (w, x, y, z), opacities 0..1, and real SH color coefficients
+  (N, (degree + 1)^2, 3) in the 3DGS order. These are the quantities of OpenUSD's
+  `ParticleField3DGaussianSplat`, so readers decode once (the 3DGS reference PLY
+  stores log scales, logit opacities and unnormalized quaternions) and nothing
+  downstream has to know the encoding.
+- SH coefficients are kept as stored: the 3DGS convention adds 0.5 to the
+  evaluated color, so the view-independent color is 0.5 + SH_C0 x sh[:, 0]
+  (`base_colors()`).
+- Per-splat values a file carries beyond these (a method's own fields, e.g.
+  GaussianAvatars' parent triangle `binding_0`) are kept in `attributes` by name,
+  to be written back.
+- No writer stores splats yet: each warns that they are not written, so they're
+  never dropped silently.
+
 ## Animation
 
 - **Keyframes, not baked samples.** `Scene.animations` holds clips

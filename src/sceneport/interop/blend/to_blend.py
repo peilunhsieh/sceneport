@@ -593,6 +593,7 @@ def _warn_unsupported(scene: Scene) -> None:
         for what, present in (
             ("blend shape normal offsets (Blender computes shape normals)",
              any(s.normal_offsets is not None for m in scene.meshes for s in m.blend_shapes)),
+            ("Gaussian splats", any(node.splats is not None for node in nodes)),
         )
         if present
     ]  # fmt: skip
