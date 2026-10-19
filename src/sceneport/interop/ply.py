@@ -16,7 +16,10 @@ Skins, blend shapes and animation can't be stored.
 
 Reading: ASCII and binary (either byte order). Per-corner `texcoord` lists and
 per-vertex `s`/`t` (or `u`/`v`, `texture_u`/`texture_v`) UVs are both read;
-elements other than vertex and face are skipped.
+elements other than vertex and face are skipped. A file without faces whose
+vertices have `opacity`, `scale_*` and `rot_*` is read as 3D Gaussian splats
+(the 3DGS reference layout, decoded to the physical values of Node.splats;
+other per-splat properties are kept in its `attributes`).
 """
 
 from __future__ import annotations
@@ -28,6 +31,7 @@ from pathlib import Path
 import numpy as np
 from numpy.typing import NDArray
 
+from ..scene.splats import SH_C0, GaussianSplats
 from ..scene.types import Mesh, Node, Primvar, Scene
 from .export import mesh_in_world, unit_scale, warn_dropped
 
@@ -189,8 +193,12 @@ def load(path: str | os.PathLike) -> Scene:
         values = _read_binary(data, body_start, elements, "<" if fmt == "binary_little_endian" else ">")
 
     vertex, face = values.get("vertex", {}), values.get("face", {})
-    positions = np.stack([np.asarray(vertex[a], dtype=np.float64) for a in "xyz"], axis=1)
     index_lists = face.get("vertex_indices", face.get("vertex_index", []))
+    if not len(index_lists) and all(p in vertex for p in ("opacity", "scale_0", "rot_0")):
+        splats = _splats(vertex, Path(path).stem)
+        return Scene(nodes=[Node(splats.name, splats=splats)])
+
+    positions = np.stack([np.asarray(vertex[a], dtype=np.float64) for a in "xyz"], axis=1)
     counts = np.array([len(i) for i in index_lists], dtype=np.int32)
     indices = np.concatenate(index_lists).astype(np.int32) if len(index_lists) else np.zeros(0, np.int32)
     mesh = Mesh(Path(path).stem, positions, counts, indices)
@@ -207,6 +215,55 @@ def load(path: str | os.PathLike) -> Scene:
                 mesh.uvs["UVMap"] = Primvar(np.stack([vertex[u], vertex[v]], axis=1).astype(np.float64), "vertex")
                 break
     return Scene(nodes=[Node(mesh.name, mesh=mesh)])
+
+
+def _splats(vertex: dict, name: str) -> GaussianSplats:
+    """Decode the 3DGS reference layout: log scales, logit opacity, unnormalized w-x-y-z quaternion and
+    SH as f_dc_0..2 plus f_rest_* (all of red's higher-order coefficients, then green's, then blue's).
+    Two scales (2DGS surfels) get a zero third; red/green/blue colors stand in for missing f_dc.
+    Every other property except the unused normals is kept in `attributes`."""
+
+    def column(prop):
+        return np.asarray(vertex[prop], dtype=np.float64)
+
+    def numbered(prefix):  # prefix_0, prefix_1, ... in numeric order
+        found = [p for p in vertex if p.startswith(prefix) and p[len(prefix) :].isdigit()]
+        return sorted(found, key=lambda p: int(p[len(prefix) :]))
+
+    used = {"x", "y", "z", "nx", "ny", "nz", "opacity"}
+    positions = np.stack([column(a) for a in "xyz"], axis=1)
+    n = len(positions)
+
+    scale_props, rot_props = numbered("scale_"), numbered("rot_")
+    if len(scale_props) not in (2, 3) or len(rot_props) != 4:
+        raise ValueError(f"{name}: expected 2 or 3 scale_* and 4 rot_* properties, got {len(scale_props)} and {len(rot_props)}")
+    scales = np.zeros((n, 3))
+    scales[:, : len(scale_props)] = np.exp(np.stack([column(p) for p in scale_props], axis=1))
+    orientations = np.stack([column(p) for p in rot_props], axis=1)
+    norms = np.linalg.norm(orientations, axis=1, keepdims=True)
+    orientations = np.where(norms > 0, orientations / np.where(norms > 0, norms, 1.0), [1.0, 0.0, 0.0, 0.0])
+    opacities = 0.5 * (1.0 + np.tanh(0.5 * column("opacity")))  # sigmoid, without overflow for large logits
+    used.update(scale_props + rot_props)
+
+    dc_props, rest_props = numbered("f_dc_"), numbered("f_rest_")
+    if len(dc_props) == 3:
+        dc = np.stack([column(p) for p in dc_props], axis=1)
+        used.update(dc_props)
+    elif all(c in vertex for c in ("red", "green", "blue")):  # plain 8-bit colors: the degree-0 term giving them
+        dc = (np.stack([column(c) for c in ("red", "green", "blue")], axis=1) / 255.0 - 0.5) / SH_C0
+        used.update(("red", "green", "blue"))
+    else:
+        dc = np.zeros((n, 3))
+    rest = np.zeros((n, 0, 3))
+    if rest_props:
+        if len(rest_props) % 3 or round(np.sqrt(len(rest_props) // 3 + 1)) ** 2 != len(rest_props) // 3 + 1:
+            raise ValueError(f"{name}: {len(rest_props)} f_rest_* properties isn't 3 x (a square - 1)")
+        rest = np.stack([column(p) for p in rest_props], axis=1).reshape(n, 3, -1).transpose(0, 2, 1)
+        used.update(rest_props)
+    sh = np.concatenate([dc[:, None], rest], axis=1)
+
+    attributes = {p: np.asarray(values) for p, values in vertex.items() if p not in used}
+    return GaussianSplats(name, positions, scales, orientations, opacities, sh, attributes)
 
 
 def _parse_header(text: str):

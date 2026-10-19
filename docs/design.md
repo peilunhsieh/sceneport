@@ -400,6 +400,14 @@ future changes can keep them consistent (or revisit them deliberately).
 - Per-splat values a file carries beyond these (a method's own fields, e.g.
   GaussianAvatars' parent triangle `binding_0`) are kept in `attributes` by name,
   to be written back.
+- PLY reading (interop/ply.py): a file without faces whose vertices have
+  `opacity`, `scale_*` and `rot_*` is splats, in the 3DGS reference layout:
+  exp of the log scales, sigmoid of the logit opacity, the w-x-y-z quaternion
+  normalized, SH from `f_dc_0..2` plus `f_rest_*` (all of red's higher-order
+  coefficients, then green's, then blue's; the degree follows from their count).
+  Two scales (2DGS) get a zero third; `red`/`green`/`blue` stand in for missing
+  `f_dc`. The unused normals are dropped; every other property goes to
+  `attributes`. Compressed splat formats (.splat, .spz, compressed PLY) aren't read.
 - No writer stores splats yet: each warns that they are not written, so they're
   never dropped silently.
 

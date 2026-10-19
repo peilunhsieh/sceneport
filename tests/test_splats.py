@@ -30,6 +30,62 @@ def test_rejects_mismatched_data(kwargs):
         GaussianSplats("s", np.zeros((2, 3)), np.ones((2, 3)), **kwargs)
 
 
+def gaussian_ply(path, props: dict, ascii: bool = False) -> None:
+    """A vertex-only PLY with float properties in the given order (the 3DGS reference layout)."""
+    n = len(next(iter(props.values())))
+    header = f"ply\nformat {'ascii' if ascii else 'binary_little_endian'} 1.0\nelement vertex {n}\n"
+    header += "".join(f"property float {name}\n" for name in props) + "end_header\n"
+    table = np.stack([np.asarray(v, dtype=np.float32) for v in props.values()], axis=1)
+    body = ("\n".join(" ".join(repr(float(x)) for x in row) for row in table) + "\n").encode() if ascii else table.tobytes()
+    path.write_bytes(header.encode() + body)
+
+
+def reference_props(n=3, degree=3, rng=np.random.default_rng(0)):
+    props = {a: rng.normal(size=n) for a in ("x", "y", "z")} | {a: np.zeros(n) for a in ("nx", "ny", "nz")}
+    props |= {f"f_dc_{i}": rng.normal(size=n) for i in range(3)}
+    props |= {f"f_rest_{i}": rng.normal(size=n) for i in range(3 * ((degree + 1) ** 2 - 1))}
+    props |= {"opacity": rng.normal(size=n) * 3}
+    props |= {f"scale_{i}": rng.normal(size=n) - 4 for i in range(3)}
+    props |= {f"rot_{i}": rng.normal(size=n) for i in range(4)}
+    return props
+
+
+@pytest.mark.parametrize("ascii", [False, True])
+def test_reads_3dgs_ply(tmp_path, ascii):
+    props = reference_props() | {"binding_0": np.array([7.0, 0.0, 10143.0])}  # GaussianAvatars' parent triangle
+    gaussian_ply(tmp_path / "avatar.ply", props, ascii=ascii)
+    (node,) = sceneport.load(tmp_path / "avatar.ply").nodes
+    splats = node.splats
+    assert node.mesh is None and splats.name == "avatar" and len(splats) == 3 and splats.sh_degree == 3
+    f32 = {k: np.asarray(v, dtype=np.float32).astype(float) for k, v in props.items()}
+    np.testing.assert_allclose(splats.positions, np.stack([f32[a] for a in "xyz"], axis=1))
+    np.testing.assert_allclose(splats.scales, np.exp(np.stack([f32[f"scale_{i}"] for i in range(3)], axis=1)))
+    np.testing.assert_allclose(splats.opacities, 1 / (1 + np.exp(-f32["opacity"])))
+    rot = np.stack([f32[f"rot_{i}"] for i in range(4)], axis=1)
+    np.testing.assert_allclose(splats.orientations, rot / np.linalg.norm(rot, axis=1, keepdims=True))
+    np.testing.assert_allclose(splats.sh[:, 0], np.stack([f32[f"f_dc_{i}"] for i in range(3)], axis=1))
+    # f_rest holds red's 15 higher-order coefficients, then green's, then blue's.
+    np.testing.assert_allclose(splats.sh[:, 1:, 1], np.stack([f32[f"f_rest_{15 + k}"] for k in range(15)], axis=1))
+    assert set(splats.attributes) == {"binding_0"}
+    np.testing.assert_array_equal(splats.attributes["binding_0"], [7, 0, 10143])
+
+
+def test_reads_2dgs_and_color_only_splats(tmp_path):
+    props = {k: v for k, v in reference_props(degree=0).items() if k not in ("scale_2", "f_dc_0", "f_dc_1", "f_dc_2")}
+    props |= {"red": np.array([255.0, 0.0, 128.0]), "green": np.zeros(3), "blue": np.full(3, 255.0)}
+    gaussian_ply(tmp_path / "surfels.ply", props)
+    splats = sceneport.load(tmp_path / "surfels.ply").nodes[0].splats
+    assert splats.sh_degree == 0 and not splats.attributes
+    np.testing.assert_array_equal(splats.scales[:, 2], 0)  # flat Gaussians
+    np.testing.assert_allclose(splats.base_colors(), [[1, 0, 1], [0, 0, 1], [128 / 255, 0, 1]], atol=1e-6)
+
+
+def test_point_cloud_without_splat_properties_is_still_a_mesh(tmp_path):
+    gaussian_ply(tmp_path / "points.ply", {a: np.arange(3.0) for a in "xyz"})
+    (node,) = sceneport.load(tmp_path / "points.ply").nodes
+    assert node.splats is None and node.mesh.n_vertices == 3
+
+
 @pytest.mark.parametrize("suffix", [".obj", ".ply", ".usda", ".fbx"])
 def test_writers_warn_instead_of_dropping_silently(tmp_path, suffix):
     triangle = sceneport.Mesh("tri", [[0, 0, 0], [1, 0, 0], [0, 1, 0]], [3], [0, 1, 2])  # OBJ and PLY need a mesh
