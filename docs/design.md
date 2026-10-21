@@ -669,3 +669,8 @@ future changes can keep them consistent (or revisit them deliberately).
   missing file can't be packed and stays a reference. Only the PBR
   reading is kept: source-specific graphs (FBX Phong values, MaterialX
   networks) aren't stored in the .blend.
+- **Setup scripts** (`scripts=`): Python files run in the same Blender after
+  the scene is built and before saving, as `__main__`, for scene-specific setup
+  that isn't file conversion (node trees, modifiers, object settings). One
+  Blender run instead of a second one that reopens and resaves the file; the
+  scripts' errors come back as BlenderError like the rest of the save.

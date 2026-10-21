@@ -143,6 +143,7 @@ isn't supported yet.
 sceneport.save(scene, "scene.blend")                  # Z-up meters, as Blender's own data
 sceneport.save(scene, "scene.blend", blender="/Applications/Blender.app")
 sceneport.save(scene, "scene.blend", pack_images=True)  # texture images stored inside the .blend
+sceneport.save(scene, "scene.blend", scripts=["setup.py"])  # your bpy setup, run before saving
 ```
 
 Blender is found from `blender=` (an executable, or the `.app` on macOS), then

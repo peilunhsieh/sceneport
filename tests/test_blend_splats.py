@@ -1,10 +1,12 @@
 """Gaussian splats in .blend files (point clouds with Blender 5.3's splat attributes) and SH rotation."""
 
+import subprocess
+
 import numpy as np
 import pytest
 
 import sceneport
-from sceneport.interop.blend import run_in_blender
+from sceneport.interop.blend import BlenderError, run_in_blender
 from sceneport.math import quaternion_matrix
 from sceneport.scene import GaussianSplats, Node, Scene
 from sceneport.scene.splats import rotate_sh, sh_basis
@@ -50,3 +52,20 @@ def test_splats_written_as_a_blender_point_cloud(blender, tmp_path):
     np.testing.assert_array_equal(attributes["binding_0"], splats.attributes["binding_0"])
     if obj["pointcloud_type"] is not None:  # Blender 5.3+
         assert obj["pointcloud_type"] == "GAUSSIAN_SPLAT"
+
+
+def test_scripts_run_before_saving(blender, tmp_path):
+    triangle = sceneport.Mesh("tri", [[0, 0, 0], [1, 0, 0], [0, 1, 0]], [3], [0, 1, 2])
+    script = tmp_path / "setup.py"
+    script.write_text("import bpy\nbpy.data.objects['tri'].add_rest_position_attribute = True\n"
+                      "bpy.data.texts.new('ran_' + __name__ + ('_saved' if bpy.data.filepath else '_unsaved'))\n")  # fmt: skip
+    sceneport.save(Scene(nodes=[Node("tri", mesh=triangle)]), tmp_path / "tri.blend", blender=blender, scripts=[script])
+    check = "import bpy; print('REST', bpy.data.objects['tri'].add_rest_position_attribute, [t.name for t in bpy.data.texts])"
+    run = subprocess.run([str(blender.path), "-b", "--factory-startup", str(tmp_path / "tri.blend"), "--python-expr", check],
+                         capture_output=True, text=True)  # fmt: skip
+    assert "REST True ['ran___main___unsaved']" in run.stdout
+
+    (tmp_path / "broken.py").write_text("raise ValueError('setup failed')\n")
+    with pytest.raises(BlenderError, match="setup failed"):
+        sceneport.save(Scene(nodes=[Node("tri", mesh=triangle)]), tmp_path / "tri.blend", blender=blender,
+                       scripts=[tmp_path / "broken.py"])  # fmt: skip
