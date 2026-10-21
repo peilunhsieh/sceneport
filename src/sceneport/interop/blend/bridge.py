@@ -43,12 +43,24 @@ def write_blend(payload: dict) -> None:
     write_blend(payload["scene"], payload["path"], pack_images=payload.get("pack_images", False))
 
 
+def _attribute_values(attribute, count: int):
+    """A Blender attribute's values as an (count, ...) numpy array."""
+    import numpy as np
+
+    width = {"FLOAT_VECTOR": 3, "FLOAT_COLOR": 4, "FLOAT4": 4, "QUATERNION": 4, "FLOAT2": 2}.get(attribute.data_type, 1)
+    field = {"FLOAT_VECTOR": "vector", "FLOAT4": "vector", "FLOAT_COLOR": "color"}.get(attribute.data_type, "value")
+    values = np.empty(count * width, dtype=np.int32 if attribute.data_type == "INT" else np.float32)
+    attribute.data.foreach_get(field, values)
+    return values.reshape(count, width) if width > 1 else values
+
+
 def inspect_blend(payload: dict) -> dict:
     """What a .blend holds, as plain data (a diagnostic, used by the tests): per object its name, type,
     parent (and parent bone), rotation mode and world matrix; for meshes their points, faces, corner
     normals, UV maps, shape keys (points, value, slider range), vertex groups, modifiers and evaluated
     world-space points (shape keys and armatures applied); for armatures their bones (parent, length,
-    rest matrix and posed matrix, in armature space). Returns {"objects": [...], "collections": the scene
+    rest matrix and posed matrix, in armature space); for point clouds their type (Blender 5.3+) and
+    attributes ({name: (data type, values)}). Returns {"objects": [...], "collections": the scene
     collection's tree (name, objects, hide_render, hide_viewport, color_tag, children), "scene": fps and
     frame range, "actions": names, fake users, slots and F-curve paths, "world": the World's nodes,
     "frames": per frame in payload["frames"], each object's world matrix, (meshes) evaluated world points,
@@ -101,6 +113,9 @@ def inspect_blend(payload: dict) -> dict:
             info["camera"] = settings(obj.data, camera_keys)
         if obj.type == "LIGHT":
             info["light"] = settings(obj.data, light_keys)
+        if obj.type == "POINTCLOUD":
+            info["pointcloud_type"] = getattr(obj.data, "type", None)
+            info["attributes"] = {a.name: (a.data_type, _attribute_values(a, len(obj.data.points))) for a in obj.data.attributes}
         if obj.type == "ARMATURE":
             info["bones"] = [
                 {"name": b.name, "parent": b.parent.name if b.parent else None, "length": b.length,

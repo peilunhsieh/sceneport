@@ -140,14 +140,26 @@ def test_transformed_maps_covariances(linear):
 
 
 def test_node_transform_and_units_applied_on_write(tmp_path):
-    splats = GaussianSplats("s", [[1.0, 0, 0]], [[0.1, 0.2, 0.3]], sh=np.zeros((1, 4, 3)))
+    from sceneport.scene.splats import sh_basis
+
+    sh = np.random.default_rng(2).normal(size=(1, 4, 3))
+    splats = GaussianSplats("s", [[1.0, 0, 0]], [[0.1, 0.2, 0.3]], sh=sh)
     rotate = sceneport.Transform(rotation=np.array([0.0, 0.0, 90.0]))
     scene = Scene(nodes=[Node("splats", rotate, splats=splats)], meters_per_unit=0.01)  # centimeters
-    with pytest.warns(UserWarning, match="view-dependent"):
-        sceneport.save(scene, tmp_path / "out.ply")
+    sceneport.save(scene, tmp_path / "out.ply")  # a rotation times a uniform scale: no warning
     back = sceneport.load(tmp_path / "out.ply").nodes[0].splats
     np.testing.assert_allclose(back.positions, [[0, 0.01, 0]], atol=1e-9)
     np.testing.assert_allclose(back.scales, [[0.001, 0.002, 0.003]], rtol=1e-6)
+    # View-dependent color turns with the splat: the old color toward +X is now seen toward +Y.
+    toward = lambda d, coefficients: sh_basis(np.array([d], dtype=float), 1) @ coefficients[0]
+    np.testing.assert_allclose(toward([0, 1, 0], back.sh), toward([1, 0, 0], sh), atol=1e-6)
+
+
+def test_uneven_scale_warns_that_view_dependent_color_is_approximate(tmp_path):
+    splats = GaussianSplats("s", [[1.0, 0, 0]], [[0.1, 0.2, 0.3]], sh=np.ones((1, 4, 3)))
+    stretch = sceneport.Transform(scale=np.array([1.0, 2.0, 1.0]))
+    with pytest.warns(UserWarning, match="approximately"):
+        sceneport.save(Scene(nodes=[Node("splats", stretch, splats=splats)]), tmp_path / "out.ply")
 
 
 @pytest.mark.parametrize("suffix", [".obj", ".ply", ".usda", ".fbx"])

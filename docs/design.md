@@ -421,8 +421,20 @@ future changes can keep them consistent (or revisit them deliberately).
   SH padded to the highest degree, attributes not on every node dropped with a
   warning. Read and written back, the GaussianAvatars sample matches exactly
   except quaternion normalization (relative error 1e-7).
-- No other writer stores splats yet: each warns that they are not written, so
-  they're never dropped silently.
+- .blend writing: a splat node becomes a point cloud with Blender 5.3's splat
+  attributes, the layout its PLY importer makes: `position`, `scale`, `rotation`
+  (quaternion), `radiance:base` (SH DC and opacity), `radiance:sh_0..` (the
+  higher SH coefficients, RGB each), plus `radius` (the largest scale) and
+  `color` (the view-independent color, linear) for Blender's point display, and
+  the extra attributes by name. Blender 5.3+ marks it as Gaussian splats; 5.2
+  keeps plain points (5.3's Set Point Cloud Type node turns them into splats).
+- Turning splats (a node's rotation, or the axis change to Blender's Z-up) turns
+  their SH colors too: each band maps onto itself linearly, and its matrix is
+  fitted from the basis at sample directions (`rotate_sh`, exact). Skews and
+  uneven scales don't map view directions rigidly, so there the closest
+  rotation is used, with a warning.
+- USD, FBX and OBJ don't store splats yet: each warns that they are not
+  written, so they're never dropped silently.
 
 ## Animation
 

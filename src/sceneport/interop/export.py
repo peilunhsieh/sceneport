@@ -80,7 +80,8 @@ def mesh_in_world(scene: Scene, scale: float = 1.0) -> Iterator[tuple[Node, Mesh
 
 def splats_in_world(scene: Scene, scale: float = 1.0) -> Iterator[tuple[Node, GaussianSplats]]:
     """(node, its splats mapped to world space, then multiplied by `scale`) for every splat node.
-    Warns when a rotation would need the view-dependent SH coefficients rotated too (they aren't)."""
+    View-dependent (SH degree > 0) colors turn with the splats; warns when the node's matrix also
+    skews or scales unevenly, where that is only approximate."""
     for node, matrix in scene.world_matrices().items():
         if node.splats is None:
             continue
@@ -88,9 +89,9 @@ def splats_in_world(scene: Scene, scale: float = 1.0) -> Iterator[tuple[Node, Ga
         matrix = np.diag([scale, scale, scale, 1.0]) @ matrix
         linear = matrix[:3, :3]
         uniform = abs(np.cbrt(np.linalg.det(linear)))
-        if node.splats.sh_degree > 0 and not np.allclose(linear, uniform * np.eye(3), atol=1e-9 * max(uniform, 1e-300)):
-            warnings.warn(f"{node.name!r}: its splats are rotated or skewed into world space, but their view-dependent "
-                          "(SH degree > 0) colors aren't rotated with them")  # fmt: skip
+        if node.splats.sh_degree > 0 and not np.allclose(linear @ linear.T, uniform**2 * np.eye(3), atol=1e-9 * max(uniform**2, 1e-300)):
+            warnings.warn(f"{node.name!r}: its splats are skewed or scaled unevenly into world space, so their "
+                          "view-dependent (SH degree > 0) colors only approximately follow")  # fmt: skip
         yield node, node.splats if np.allclose(matrix, np.eye(4)) else node.splats.transformed(matrix)
 
 

@@ -170,6 +170,7 @@ up, meters), so objects carry no extra rotation.
 | Per-vertex animation | A `<name>_cache.usdc` beside the .blend, read by Mesh Sequence Cache modifiers: keep the two files together |
 | Cameras and lights | Cameras and lights with their animated settings; the first camera is the scene's camera (its `exposure`, in stops, is the view's exposure: Blender has none per camera), the first dome light the World |
 | Materials | Principled BSDF setups built from each material's PBR reading (textures, UV transforms, channels, normal maps); images are linked by paths relative to the .blend, or packed into it with `pack_images=True`; images embedded in an FBX are always packed |
+| Gaussian splats | Point clouds with Blender 5.3's splat attributes (position, scale, rotation, radiance:base, radiance:sh_*), marked as splats on Blender 5.3+ and plain points on 5.2; view-dependent colors turned to Z-up |
 | Collections | Blender collections, nested the same way |
 | `scene.extras["blender"]["texts"]` | Text datablocks (`{name: source}`): scripts saved in the file, run from Blender's Text Editor (Alt+P); nothing runs by itself |
 

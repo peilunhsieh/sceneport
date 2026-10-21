@@ -56,9 +56,11 @@ from pathlib import Path
 import bpy
 import numpy as np
 from mathutils import Matrix
+from numpy.typing import NDArray
 
 from ...math import _axes, complete_rotation, quaternion_continuity, quaternion_from_matrix
 from ...scene.animation import Animation, Channel, _auto_slopes
+from ...scene.splats import GaussianSplats
 from ...scene.types import Mesh, Node, Primvar, Scene
 from . import cameras_lights
 from .materials import MaterialWriter, assign
@@ -132,6 +134,12 @@ def scene_to_blender(
                 domes.append(node)  # the World; the node stays an empty
             else:
                 data = cameras_lights.light_data(node.light, node.name, node.name)
+        if node.splats is not None:
+            if data is not None or node in domes:
+                warnings.warn(f"{node.name!r}: a Blender object can't hold Gaussian splats and a mesh, armature, camera "
+                              "or light; its splats are skipped")  # fmt: skip
+            else:
+                data = _splats(node.splats)
         obj = bpy.data.objects.new(node.name, data)
         collection.objects.link(obj)
         if node.mesh is not None and node not in held and first and node.mesh.blend_shapes:
@@ -508,6 +516,41 @@ def _skin(obj, mesh: Mesh, rig_of: dict, rig_objects: dict, bone_names: dict) ->
     modifier.object = rig_objects[id(rig_of[skin.joints[0]])]
 
 
+def _splats(splats: GaussianSplats) -> bpy.types.PointCloud:
+    """A point cloud with Blender 5.3's Gaussian splat attributes (its PLY importer's layout): position,
+    scale, rotation (quaternion), radiance:base (SH DC and opacity), radiance:sh_0.. (the higher SH
+    coefficients, RGB each). Blender 5.3+ marks it as Gaussian splats; earlier versions keep a plain
+    point cloud, drawn as spheres of `radius` (the largest scale) in `color` (the view-independent
+    color, linear), which 5.3's Set Point Cloud Type node can turn into splats. Other per-splat
+    attributes (e.g. a parent triangle index) are kept under their names."""
+    data = bpy.data.pointclouds.new(splats.name)
+    data.resize(len(splats))
+
+    def put(name: str, kind: str, values: NDArray) -> None:
+        attribute = data.attributes.get(name) or data.attributes.new(name, kind, "POINT")
+        field = {"FLOAT_VECTOR": "vector", "FLOAT4": "vector", "FLOAT_COLOR": "color"}.get(kind, "value")
+        attribute.data.foreach_set(field, np.ascontiguousarray(values, dtype=np.int32 if kind == "INT" else np.float32).ravel())
+
+    put("position", "FLOAT_VECTOR", splats.positions)
+    put("scale", "FLOAT_VECTOR", splats.scales)
+    put("rotation", "QUATERNION", splats.orientations)
+    put("radiance:base", "FLOAT4", np.column_stack([splats.sh[:, 0], splats.opacities]))
+    for k in range(1, splats.sh.shape[1]):
+        put(f"radiance:sh_{k - 1}", "FLOAT_VECTOR", splats.sh[:, k])
+    put("radius", "FLOAT", splats.scales.max(axis=1))
+    srgb = splats.base_colors()
+    linear = np.where(srgb <= 0.04045, srgb / 12.92, ((srgb + 0.055) / 1.055) ** 2.4)
+    put("color", "FLOAT_COLOR", np.column_stack([linear, splats.opacities]))
+    for name, values in splats.attributes.items():
+        if values.ndim != 1 or name in data.attributes:
+            warnings.warn(f"splat attribute {name!r} isn't one value per splat or clashes with a Blender attribute; it is skipped")
+            continue
+        put(name, "INT" if np.issubdtype(values.dtype, np.integer) else "FLOAT", values)
+    if hasattr(data, "type"):  # Blender 5.3+: Gaussian splats rather than points
+        data.type = "GAUSSIAN_SPLAT"
+    return data
+
+
 def _mesh(mesh: Mesh) -> bpy.types.Mesh:
     data = bpy.data.meshes.new(mesh.name)
     counts = mesh.face_vertex_counts
@@ -593,7 +636,6 @@ def _warn_unsupported(scene: Scene) -> None:
         for what, present in (
             ("blend shape normal offsets (Blender computes shape normals)",
              any(s.normal_offsets is not None for m in scene.meshes for s in m.blend_shapes)),
-            ("Gaussian splats", any(node.splats is not None for node in nodes)),
         )
         if present
     ]  # fmt: skip

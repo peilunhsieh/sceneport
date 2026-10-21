@@ -179,9 +179,9 @@ def change_basis(scene: Scene, *, up: str, front: str, right: str, meters_per_un
     """`scene` expressed with other axes and units, looking the same.
 
     With M = s * C (C the axis change, s the unit factor), every node's local matrix
-    becomes M @ local @ M^-1 and mesh points, offsets, inverse binds and camera / light
-    distances follow; the result's world matrices are M @ world @ M^-1. Since C only
-    swaps and flips axes, a plain translation / Euler / scale transform stays one (its
+    becomes M @ local @ M^-1 and mesh points, offsets, inverse binds, camera / light
+    distances and Gaussian splats (SH colors included) follow; the result's world matrices
+    are M @ world @ M^-1. Since C only swaps and flips axes, a plain translation / Euler / scale transform stays one (its
     rotation order permuted) and its animation channels map one-to-one, keys unchanged;
     nodes with pivots or pre / post rotations become plain transforms (baked per frame
     when animated). Cameras and lights keep looking down their node's -Z (and a dome's
@@ -259,6 +259,8 @@ def change_basis(scene: Scene, *, up: str, front: str, right: str, meters_per_un
         clip.point_samples = [dataclasses.replace(p, points=p.points @ (s * c).T) for p in clip.point_samples]
     converted = dataclasses.replace(converted, up_axis=up, front_axis=front, right_axis=right, meters_per_unit=meters_per_unit)
     for node, _ in converted.walk():
+        if node.splats is not None:  # like mesh points: positions, axes and SH colors turned by M
+            node.splats = node.splats.transformed(m)
         if node.camera is not None and s != 1.0:
             node.camera = dataclasses.replace(node.camera, **{f: _scaled(getattr(node.camera, f), s) for f in CAMERA_DISTANCES})
         if node.light is not None and s != 1.0:
