@@ -124,6 +124,22 @@ def quaternion_continuity(q: ArrayLike) -> NDArray[np.float64]:
     return q
 
 
+def look_at_matrix(eye: ArrayLike, target: ArrayLike, up: ArrayLike = (0.0, 1.0, 0.0)) -> NDArray[np.float64]:
+    """4x4 world matrix of a camera at `eye` aimed at `target`, in sceneport's camera convention
+    (looking down its local -Z, +Y up): -Z points at `target`, +Y as close to `up` as it can be,
+    +X to the right. Use it as a camera node's transform (e.g. Transform(*decompose_matrix(m)))."""
+    eye, target, up = (np.asarray(v, dtype=np.float64) for v in (eye, target, up))
+    forward = target - eye
+    forward /= np.linalg.norm(forward)
+    right = np.cross(forward, up)
+    if np.linalg.norm(right) < 1e-12:
+        raise ValueError("look_at_matrix: `up` is parallel to the view direction")
+    right /= np.linalg.norm(right)
+    m = np.eye(4)
+    m[:3, 0], m[:3, 1], m[:3, 2], m[:3, 3] = right, np.cross(right, forward), -forward, eye
+    return m
+
+
 def decompose_matrix(m: ArrayLike, order: int | str = 0) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:
     """Split 4x4 matrices into (translation, Euler degrees for `order`, scale). Shear is lost.
 

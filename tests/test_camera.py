@@ -114,3 +114,18 @@ def test_fbx_has_no_camera_exposure():
     scene = exposed_scene()
     with pytest.warns(UserWarning, match="no camera exposure"):
         document_from_scene(scene)
+
+
+def test_look_at_matrix_aims_minus_z_at_the_target():
+    from sceneport.math import decompose_matrix, look_at_matrix
+
+    m = look_at_matrix([0.0, 0.0, 5.0], [0.0, 0.0, 0.0])
+    np.testing.assert_allclose(m, np.array([[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 5], [0, 0, 0, 1]]), atol=1e-12)
+    eye, target = np.array([1.0, 2.0, 3.0]), np.array([-2.0, 0.5, 1.0])
+    m = look_at_matrix(eye, target, up=[0, 0, 1])
+    np.testing.assert_allclose(-m[:3, 2], (target - eye) / np.linalg.norm(target - eye))
+    np.testing.assert_allclose(m[:3, :3] @ m[:3, :3].T, np.eye(3), atol=1e-12)
+    assert np.linalg.det(m[:3, :3]) > 0 and m[2, 1] > 0  # a rotation, its +Y leaning toward +Z (up)
+    np.testing.assert_allclose(Transform(*decompose_matrix(m)).matrix(), m, atol=1e-12)
+    with pytest.raises(ValueError):
+        look_at_matrix([0, 0, 0], [0, 1, 0])
