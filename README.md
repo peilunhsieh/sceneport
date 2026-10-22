@@ -10,7 +10,7 @@ a converter around it:
 
 | Package | Responsibility |
 |---|---|
-| `sceneport.scene` | Plain numpy data classes: Scene, Node, Mesh, Primvar, Transform, Material |
+| `sceneport.scene` | Plain numpy data classes: Scene, Node, Mesh, Primvar, Transform, Material, Camera, Light, GaussianSplats |
 | `sceneport.interop.fbx` | Native FBX read/write |
 | `sceneport.interop.usd` | USD read/write (`.usd`, `.usda`, `.usdc`, `.usdz`) via usd-core |
 | `sceneport.interop.obj`, `sceneport.interop.ply` | OBJ (+ MTL) and PLY read/write |
@@ -80,6 +80,18 @@ props = Collection("Props", [table, shelf], children=[Collection("Chairs", [chai
 scene.collections.append(props)          # a node may be in several collections, or none
 scene.find_collection("Chairs").nodes    # direct members (a member's children aren't implied)
 props.all_nodes()                        # members, nested collections included
+
+# Gaussian splats (3DGS PLY, .blend): physical values on Node.splats
+splats = sceneport.load("point_cloud.ply").nodes[0].splats
+splats.positions, splats.scales          # (N, 3); scales are standard deviations
+splats.orientations, splats.opacities    # (N, 4) w, x, y, z; (N,) 0..1
+splats.sh, splats.base_colors()          # (N, K, 3) SH coefficients (3DGS order); view-independent RGB
+splats.attributes                        # other per-splat values, e.g. {"binding_0": ...}
+splats.transformed(matrix)               # moved by a 4x4 matrix, axes and SH colors turned too
+
+# Cameras: lens settings on a node, looking down its -Z; look_at_matrix aims one
+from sceneport.math import decompose_matrix, look_at_matrix
+camera = Node("camera", Transform(*decompose_matrix(look_at_matrix(eye, target))), camera=Camera(focal_length=50.0))
 
 sceneport.save(scene, "out.fbx")
 ```
@@ -299,6 +311,7 @@ the repository.
 - [x] Phase 4 — skeleton / skinning (linear blend skinning), FBX and USD
 - [x] Phase 5 — animation (keyframes, joints/nodes/blend shape weights), FBX and USD
 - [ ] Phase 6 — `.blend` through an installed Blender: running Blender, writing meshes, shape keys, armatures, skins, animation, cameras, lights and PBR materials (done); reading
+- [x] Gaussian splats — the 3DGS PLY (read and write) and `.blend` (write); not yet USD
 
 ## Conventions
 
@@ -322,6 +335,9 @@ The reasoning behind these is in
 - Blend shapes store offsets (not absolute positions), a default `weight`
   (1 = fully applied) and optional in-betweens; weights interpolate linearly
   through the in-betweens, as in FBX and UsdSkel.
+- Gaussian splats (`Node.splats`) hold physical values (scales, opacities,
+  unit quaternions, raw SH coefficients in the 3DGS order), not a file's
+  encoding; other per-splat fields stay in `splats.attributes`.
 - Per-vertex data such as normals and UVs keeps FBX's indexed form, using USD
   interpolation names (`vertex`, `faceVarying`, `uniform`, `constant`); helpers
   expand it to one value per corner.

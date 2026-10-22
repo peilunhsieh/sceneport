@@ -333,7 +333,9 @@ future changes can keep them consistent (or revisit them deliberately).
 - `Node.camera` (scene/camera.py): lens settings on a node; the node's
   transform places and aims it, looking down local -Z with +Y up (USD, glTF,
   Blender). Physical units: focal length, apertures and offsets in mm,
-  clipping and focus distance in scene units.
+  clipping and focus distance in scene units. `math.look_at_matrix(eye,
+  target, up)` gives the world matrix that aims a camera node (-Z at the
+  target, +Y toward `up`).
 - USD: the node's prim is a `Camera`; lens values are in tenths of a scene unit
   (mm per unit = 100 x metersPerUnit, as Blender converts).
 - FBX: a camera Model with a "Camera" NodeAttribute (film sizes in inches).
@@ -386,55 +388,67 @@ future changes can keep them consistent (or revisit them deliberately).
 
 ## Gaussian splats
 
-- `Node.splats` (scene/splats.py): 3D Gaussians placed by the node, like a
-  mesh. **Physical values, not a file's encoding**: positions, per-axis scales
-  (standard deviations, scene units; a 2DGS surfel has a zero third scale), unit
-  quaternions (w, x, y, z), opacities 0..1, and real SH color coefficients
-  (N, (degree + 1)^2, 3) in the 3DGS order. These are the quantities of OpenUSD's
-  `ParticleField3DGaussianSplat`, so readers decode once (the 3DGS reference PLY
-  stores log scales, logit opacities and unnormalized quaternions) and nothing
-  downstream has to know the encoding.
-- SH coefficients are kept as stored: the 3DGS convention adds 0.5 to the
-  evaluated color, so the view-independent color is 0.5 + SH_C0 x sh[:, 0]
-  (`base_colors()`).
-- Per-splat values a file carries beyond these (a method's own fields, e.g.
-  GaussianAvatars' parent triangle `binding_0`) are kept in `attributes` by name,
-  to be written back.
-- PLY reading (interop/ply.py): a file without faces whose vertices have
-  `opacity`, `scale_*` and `rot_*` is splats, in the 3DGS reference layout:
-  exp of the log scales, sigmoid of the logit opacity, the w-x-y-z quaternion
-  normalized, SH from `f_dc_0..2` plus `f_rest_*` (all of red's higher-order
-  coefficients, then green's, then blue's; the degree follows from their count).
-  Two scales (2DGS) get a zero third; `red`/`green`/`blue` stand in for missing
-  `f_dc`. The unused normals are dropped; every other property goes to
-  `attributes`. Compressed splat formats (.splat, .spz, compressed PLY) aren't read.
-- PLY writing: a scene with splats and no meshes is written in the same
-  reference layout (a PLY file holds a mesh or splats, so with meshes too the
-  splats are dropped with a warning). Splats are mapped to world space and
-  units like meshes (`GaussianSplats.transformed`): a rotation times a uniform
-  scale rotates the orientations and scales the scales; any other matrix maps
-  the covariance (A Σ Aᵀ) and re-derives the axes, largest first, so flat 2DGS
-  splats keep a zero third scale (written as two scales). SH coefficients aren't
-  rotated, with a warning when view-dependent ones (degree > 0) would need it.
-  Opacities are clipped to 1e-12..1 - 1e-12 so the logit stays finite; extra
-  attributes keep their names and numeric types. Several splat nodes are joined:
-  SH padded to the highest degree, attributes not on every node dropped with a
-  warning. Read and written back, the GaussianAvatars sample matches exactly
-  except quaternion normalization (relative error 1e-7).
-- .blend writing: a splat node becomes a point cloud with Blender 5.3's splat
-  attributes, the layout its PLY importer makes: `position`, `scale`, `rotation`
-  (quaternion), `radiance:base` (SH DC and opacity), `radiance:sh_0..` (the
-  higher SH coefficients, RGB each), plus `radius` (the largest scale) and
-  `color` (the view-independent color, linear) for Blender's point display, and
-  the extra attributes by name. Blender 5.3+ marks it as Gaussian splats; 5.2
-  keeps plain points (5.3's Set Point Cloud Type node turns them into splats).
-- Turning splats (a node's rotation, or the axis change to Blender's Z-up) turns
-  their SH colors too: each band maps onto itself linearly, and its matrix is
-  fitted from the basis at sample directions (`rotate_sh`, exact). Skews and
-  uneven scales don't map view directions rigidly, so there the closest
-  rotation is used, with a warning.
-- USD, FBX and OBJ don't store splats yet: each warns that they are not
-  written, so they're never dropped silently.
+**Model.** `Node.splats` (scene/splats.py) holds 3D Gaussians placed by the
+node, like a mesh, in **physical values, not a file's encoding**:
+
+- positions; per-axis scales (standard deviations in scene units; a 2DGS surfel
+  has a zero third scale); unit quaternions (w, x, y, z); opacities 0..1;
+- real SH color coefficients (N, (degree + 1)^2, 3) in the 3DGS order and signs,
+  kept as stored. The 3DGS convention adds 0.5 to the evaluated color, so a
+  splat's color toward direction d is 0.5 + `sh_basis(d)` @ sh and its
+  view-independent color 0.5 + SH_C0 x sh[:, 0] (`base_colors()`);
+- `attributes`: any other per-splat values a file carries (a method's own
+  fields, e.g. GaussianAvatars' parent triangle `binding_0`), by name, so they
+  can be written back.
+
+These are the quantities of OpenUSD's `ParticleField3DGaussianSplat`, so a
+reader decodes once (the 3DGS reference PLY stores log scales, logit opacities
+and unnormalized quaternions) and nothing downstream needs to know a file's
+encoding.
+
+**Moving splats.** `GaussianSplats.transformed(matrix)` maps every Gaussian by a
+4x4 matrix: positions move and covariances become A Σ Aᵀ. A rotation times a
+uniform scale rotates the orientations and scales the scales; any other matrix
+re-derives each splat's axes from its covariance, largest first, so flat 2DGS
+splats stay flat. SH colors turn with the splats: each band maps onto itself
+linearly, and `rotate_sh` fits its matrix from the basis at sample directions
+(exact). Skews and uneven scales don't map view directions rigidly, so there the
+closest rotation is used, with a warning. Writers use it for node transforms and
+units (PLY), and `change_basis` for axis changes (Blender's Z-up).
+
+**PLY** (interop/ply.py), the 3DGS reference layout:
+
+- Reading: a file without faces whose vertices have `opacity`, `scale_*` and
+  `rot_*` is splats: exp of the log scales, sigmoid of the logit opacity, the
+  quaternion normalized, SH from `f_dc_0..2` plus `f_rest_*` (all of red's
+  higher-order coefficients, then green's, then blue's; the degree follows from
+  their count). Two scales (2DGS) get a zero third; `red`/`green`/`blue` stand in
+  for a missing `f_dc`. The unused normals are dropped; every other property
+  goes to `attributes`. Compressed formats (.splat, .spz, compressed PLY) aren't
+  read.
+- Writing: a scene with splats and no meshes is written in the same layout (a
+  PLY file holds a mesh or splats, so with meshes too the splats are dropped
+  with a warning), in world space and meters like meshes. Flat splats get two
+  scales; opacities are clipped to 1e-12..1 - 1e-12 so the logit stays finite;
+  extra attributes keep their names and numeric types. Several splat nodes are
+  joined: SH padded to the highest degree, attributes not on every node dropped
+  with a warning. Read and written back, the GaussianAvatars sample matches
+  exactly except quaternion normalization (relative error 1e-7).
+
+**.blend** (interop/blend/to_blend.py): a splat node becomes a point cloud with
+Blender 5.3's splat attributes, the layout its PLY importer makes: `position`,
+`scale`, `rotation` (quaternion), `radiance:base` (SH DC and opacity),
+`radiance:sh_0..` (the higher SH coefficients, RGB each), plus `radius` (the
+largest scale) and `color` (the view-independent color, linear) for Blender's
+point display, and the extra attributes by name. Blender 5.3+ marks it as
+Gaussian splats; 5.2 has no splat type and keeps plain points (5.3 turns them
+into splats by setting the point cloud's type). Blender renders the higher SH
+bands and the rotations, and blends splats in linear light (unlike the 3DGS
+reference, which blends the colors as they are), so faint, bright splats look
+brighter there.
+
+**Other formats.** USD, FBX and OBJ don't store splats yet: each warns that they
+aren't written, so they're never dropped silently.
 
 ## Animation
 
