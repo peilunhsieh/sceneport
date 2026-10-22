@@ -114,6 +114,18 @@ def quaternion_from_matrix(m: ArrayLike) -> NDArray[np.float64]:
     return np.where(q[..., :1] < 0, -q, q)
 
 
+def quaternion_multiply(a: NDArray, b: NDArray) -> NDArray[np.float64]:
+    """Hamilton product a * b of (w, x, y, z) quaternions (broadcasting): rotate by b, then by a."""
+    aw, ax, ay, az = np.moveaxis(np.asarray(a, dtype=np.float64), -1, 0)
+    bw, bx, by, bz = np.moveaxis(np.asarray(b, dtype=np.float64), -1, 0)
+    return np.stack([
+        aw * bw - ax * bx - ay * by - az * bz,
+        aw * bx + ax * bw + ay * bz - az * by,
+        aw * by - ax * bz + ay * bw + az * bx,
+        aw * bz + ax * by - ay * bx + az * bw,
+    ], axis=-1)  # fmt: skip
+
+
 def quaternion_continuity(q: ArrayLike) -> NDArray[np.float64]:
     """Flip signs along the first axis so consecutive quaternions stay on the same side
     (q and -q are the same rotation), avoiding long-way-round interpolation."""

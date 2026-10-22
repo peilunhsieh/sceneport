@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 import numpy as np
 from numpy.typing import NDArray
 
-from ..math import quaternion_from_matrix, quaternion_matrix
+from ..math import quaternion_from_matrix, quaternion_matrix, quaternion_multiply
 
 SH_C0 = 0.28209479177387814  # the degree-0 real SH basis value, 1 / (2 sqrt(pi))
 # The 3DGS reference renderer's real SH constants for bands 1 to 3 (utils/sh_utils.py), sign
@@ -123,7 +123,7 @@ class GaussianSplats:
         uniform = np.cbrt(determinant)
         if determinant > 0 and np.allclose(linear @ linear.T, uniform**2 * np.eye(3), rtol=1e-9, atol=1e-12 * uniform**2):
             rotation = quaternion_from_matrix(linear / uniform)
-            orientations = _quaternion_multiply(rotation, self.orientations)
+            orientations = quaternion_multiply(rotation, self.orientations)
             scales = self.scales * uniform
         else:
             axes = linear @ quaternion_matrix(self.orientations)[:, :3, :3] * self.scales[:, None, :]  # A R S, per axis
@@ -136,15 +136,3 @@ class GaussianSplats:
         sh = rotate_sh(self.sh, u @ vt)  # the closest rotation or reflection
         return GaussianSplats(self.name, positions, scales, orientations, self.opacities.copy(), sh,
                               {name: values.copy() for name, values in self.attributes.items()})  # fmt: skip
-
-
-def _quaternion_multiply(a: NDArray, b: NDArray) -> NDArray[np.float64]:
-    """Hamilton product a * b of (w, x, y, z) quaternions (broadcasting): rotate by b, then by a."""
-    aw, ax, ay, az = np.moveaxis(np.asarray(a, dtype=np.float64), -1, 0)
-    bw, bx, by, bz = np.moveaxis(np.asarray(b, dtype=np.float64), -1, 0)
-    return np.stack([
-        aw * bw - ax * bx - ay * by - az * bz,
-        aw * bx + ax * bw + ay * bz - az * by,
-        aw * by - ax * bz + ay * bw + az * bx,
-        aw * bz + ax * by - ay * bx + az * bw,
-    ], axis=-1)  # fmt: skip
