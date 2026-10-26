@@ -135,6 +135,8 @@ class Mesh:
     skin: Skin | None = None
     # (F,) material slot of each face, an index into the node's `materials`; None = every face uses slot 0.
     material_indices: NDArray[np.int32] | None = None
+    # Named vertex groups (e.g. a face or skin region): name -> (N,) weight of each vertex, 0 = not in it.
+    vertex_groups: dict[str, NDArray[np.float32]] = field(default_factory=dict)
 
     def __post_init__(self):
         self.vertices = np.asarray(self.vertices, dtype=np.float64).reshape(-1, 3)
@@ -142,6 +144,15 @@ class Mesh:
         self.face_vertex_indices = np.asarray(self.face_vertex_indices, dtype=np.int32)
         if self.material_indices is not None:
             self.material_indices = np.asarray(self.material_indices, dtype=np.int32)
+        self.vertex_groups = {name: np.asarray(w, dtype=np.float32) for name, w in self.vertex_groups.items()}
+        for name, weights in self.vertex_groups.items():
+            if weights.shape != (len(self.vertices),):
+                raise ValueError(f"mesh {self.name!r}: vertex group {name!r} must have shape ({len(self.vertices)},), "
+                                 f"got {weights.shape}")  # fmt: skip
+
+    def vertex_group(self, name: str, threshold: float = 0.0) -> NDArray[np.int64]:
+        """Indices of the vertices in group `name` (weight above `threshold`)."""
+        return np.flatnonzero(self.vertex_groups[name] > threshold)
 
     def deformed_vertices(
         self, weights: dict[str, float] | NDArray | None = None, vertices: NDArray | None = None

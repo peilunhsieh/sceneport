@@ -65,6 +65,10 @@ clip.vertices(mesh, times)               # (F, N, 3) in mesh space, incl. per-ve
 clip.camera_at(cam_node, times)          # [Camera] per time; channels like Channel(cam_node, "camera:focal_length", 0, ...)
 clip.light_at(light_node, times)         # [Light] per time; e.g. "light:intensity", "light:color" (components 0-2)
 
+# Vertex groups (USD and .blend): named per-vertex weights, e.g. a face region
+mesh.vertex_groups                       # {name: (N,) float32 weights}, 0 = not in the group
+mesh.vertex_group("skin")                # indices of the vertices with weight > 0
+
 # Materials (USD and FBX): generic shading node graphs
 node.materials                           # the node's material slots
 mesh.material_indices                    # (F,) slot of each face, or None = slot 0
@@ -125,6 +129,9 @@ scene = sceneport.load("model.usd")  # composed stage: references, payloads, ins
   and pre/post rotation included); other stacks are read via the local matrix.
 - The first UV set is written as `st`; original UV set names are kept in
   customData and restored on load.
+- Vertex groups are float primvars `primvars:group:<name>` (vertex
+  interpolation), their original names kept in customData. Blender's USD
+  importer reads them as float attributes.
 - Invalid prim names are made valid (`Cube.001` -> `Cube_001`); the original
   name is kept as the prim's `displayName`.
 - USD only records the up axis (Y or Z). Front/right axes are implied on load
@@ -177,6 +184,7 @@ up, meters), so objects carry no extra rotation.
 |---|---|
 | Nodes | Empties and objects, with their parents and transforms |
 | Meshes | Meshes with custom normals, UV maps and material slots |
+| Vertex groups | Vertex groups with the same weights (vertices of weight 0 left out); one named like a skin's bone is skipped, as it would deform the mesh |
 | Blend shapes | Shape keys; each slider spans the shape's `range` (default 0..1, e.g. `(-3, 3)` for a morphable model's coefficients), widened to fit its weights, since Blender clamps weights to the slider |
 | Joints and skins | One armature per joint tree, bones resting in the bind pose and posed as the scene is; vertex groups and an Armature modifier, with the mesh a child of its armature |
 | Animation | One action per clip: the first is assigned and sets the scene's fps and frame range, the others are kept with a fake user (switch in Blender) |
@@ -218,7 +226,8 @@ Meshes, blend shapes, skins, animation, materials and cameras carry over between
 and USD, as do lights (sun, point, spot, area; FBX keeps fewer of their settings);
 HDRI environment (dome) lights are USD only (`scene.environment`,
 `scene.add_environment("sky.exr")`) (materials as Phong in FBX; see the conventions below). Per-vertex
-animation (time-sampled points) is kept by USD only. For Blender, FBX export
+animation (time-sampled points) is kept by USD only. Vertex groups are kept by USD and .blend, not FBX
+(which only has skin weights; it warns). For Blender, FBX export
 splits in-between shapes into plain ones and rewrites mirrored joints (negative
 scale) without mirroring, since its importer can't handle either; both keep the
 same deformation (`split_inbetweens=False` / `unmirror_joints=False` to write

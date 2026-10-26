@@ -85,6 +85,7 @@ from ..scene.types import BlendShape, Collection, Inbetween, Mesh, Node, Primvar
 
 EXTENSIONS = (".usd", ".usda", ".usdc", ".usdz")
 NAME_KEY = "sceneport:name"  # customData: a primvar's original name
+GROUP_NAMESPACE = "group:"  # primvars:group:<name>, a mesh's vertex groups (per-vertex float weights)
 JOINT_KEY = "sceneport:joint"  # customData: joint token an attachment hangs from
 GENERATED_KEY = "sceneport:generated"  # customData: a prim added only for USD's sake (dropped on load)
 BLENDER_GENERATED_KEY = "Blender:generated"  # Blender's tag for its exporter's /root (dropped on load too)
@@ -1142,6 +1143,11 @@ def _write_mesh(stage: Usd.Stage, path: Sdf.Path, mesh: Mesh) -> UsdGeom.Mesh:
     for i, (name, uv) in enumerate(mesh.uvs.items()):
         usd_name = _prim_name("st" if i == 0 else name, names)
         _write_primvar(primvars, usd_name, Sdf.ValueTypeNames.TexCoord2fArray, Vt.Vec2fArray, uv, original=name)
+    groups = set()
+    for name, weights in mesh.vertex_groups.items():  # float primvars in the "group:" namespace
+        usd_name = GROUP_NAMESPACE + _prim_name(name, groups)
+        _write_primvar(primvars, usd_name, Sdf.ValueTypeNames.FloatArray, Vt.FloatArray, Primvar(weights, "vertex"),
+                       original=name)  # fmt: skip
     return usd_mesh
 
 
@@ -1715,7 +1721,18 @@ def _read_mesh(prim: Usd.Prim) -> Mesh:
         name = pv.GetAttr().GetCustomDataByKey(NAME_KEY) or str(pv.GetPrimvarName())
         uvs[name] = _read_primvar(pv, 2)
 
-    mesh = Mesh(_display_name(prim), vertices, counts, indices, normals=normals, uvs=uvs)
+    groups = {}
+    for pv in primvars.GetPrimvarsWithValues():
+        if pv.GetTypeName() != Sdf.ValueTypeNames.FloatArray or not str(pv.GetPrimvarName()).startswith(GROUP_NAMESPACE):
+            continue
+        group = _read_primvar(pv, 1)
+        weights = group.expanded().reshape(-1)
+        if group.interpolation != "vertex" or len(weights) != len(vertices):
+            warnings.warn(f"{prim.GetPath()}: primvar {pv.GetPrimvarName()!r} isn't one weight per vertex; it is skipped")
+            continue
+        groups[pv.GetAttr().GetCustomDataByKey(NAME_KEY) or str(pv.GetPrimvarName())[len(GROUP_NAMESPACE):]] = weights
+
+    mesh = Mesh(_display_name(prim), vertices, counts, indices, normals=normals, uvs=uvs, vertex_groups=groups)
     mesh.blend_shapes = _read_blend_shapes(prim, len(vertices))
     if usd_mesh.GetOrientationAttr().Get(_TIME) == UsdGeom.Tokens.leftHanded:
         _flip_winding(mesh)

@@ -140,6 +140,11 @@ def inspect_blend(payload: dict) -> dict:
                 for k in keys
             ]  # fmt: skip
             info["vertex_groups"] = [g.name for g in obj.vertex_groups]
+            weights = np.zeros((len(obj.vertex_groups), len(mesh.vertices)), dtype=np.float32)
+            for v in mesh.vertices:
+                for element in v.groups:
+                    weights[element.group, v.index] = element.weight
+            info["vertex_group_weights"] = {g.name: weights[g.index] for g in obj.vertex_groups}
             info["material_slots"] = [(s.material.name if s.material else None, s.link) for s in obj.material_slots]
             info["material_indices"] = get(mesh.polygons, "material_index", 1, np.int32)
             info["modifiers"] = [(m.type, getattr(m, "object", None) and m.object.name) for m in obj.modifiers]

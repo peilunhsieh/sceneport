@@ -75,7 +75,7 @@ future changes can keep them consistent (or revisit them deliberately).
   convention). PLY also reads per-vertex `s`/`t` UVs.
 - Geometry (plus MTL materials for OBJ, below). Writers bake each mesh into world space as currently posed
   (skinned by the scene's joints, blend shapes at default weights) — what
-  Blender's exporters do — and warn about dropped skins, blend shapes and
+  Blender's exporters do — and warn about dropped skins, blend shapes, vertex groups and
   animation. Neither format has units, and tools read them as meters, so
   writers convert to meters by default (`meters_per_unit=` another unit, or
   None for the scene's own); a centimeter FBX becomes the same size in Blender

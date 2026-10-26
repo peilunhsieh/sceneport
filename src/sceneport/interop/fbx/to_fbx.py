@@ -8,7 +8,7 @@ import warnings
 import numpy as np
 
 from ...scene.types import TRANSFORM_PROPERTIES, Mesh, Node, Scene, Transform
-from ..export import warn_splats
+from ..export import warn_splats, warn_vertex_groups
 from . import layers
 from .animation import write_animations
 from .blendshapes import write_blend_shapes
@@ -33,6 +33,7 @@ def save(
 ) -> None:
     """Write `scene` as binary FBX. See document_from_scene for the options."""
     warn_splats(scene, "FBX")  # FBX has no Gaussian splat type
+    warn_vertex_groups(scene, "FBX")  # FBX keeps per-vertex weights only as skin clusters
     directory = os.path.dirname(os.path.abspath(path))
     doc = document_from_scene(
         scene, version=version, directory=directory, unmirror_joints=unmirror_joints, split_inbetweens=split_inbetweens

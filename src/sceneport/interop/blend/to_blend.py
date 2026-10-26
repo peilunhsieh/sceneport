@@ -195,6 +195,8 @@ def scene_to_blender(
     for node, obj in objects.items():
         if node.mesh is not None and node.mesh.skin is not None and node not in held:
             _skin(obj, node.mesh, rig_of, rig_objects, bone_names)
+        if node.mesh is not None and node.mesh.vertex_groups and node not in held:
+            _vertex_groups(obj, node.mesh)
     if scene.collections:
         _collections(scene, collection, objects, {j: rig_objects[id(r)] for j, r in rig_of.items()})
     for index, clip in enumerate(scene.animations):
@@ -517,6 +519,18 @@ def _skin(obj, mesh: Mesh, rig_of: dict, rig_objects: dict, bone_names: dict) ->
             group.add(vertices[mine][sums[mine] == weight].tolist(), float(weight), "REPLACE")
     modifier = obj.modifiers.new("Armature", "ARMATURE")
     modifier.object = rig_objects[id(rig_of[skin.joints[0]])]
+
+
+def _vertex_groups(obj, mesh: Mesh) -> None:
+    """The mesh's vertex groups (vertices of weight 0 left out). A name a skin's bone group already
+    has would deform the mesh with that bone, so such a group is skipped."""
+    for name, weights in mesh.vertex_groups.items():
+        if name in obj.vertex_groups:
+            warnings.warn(f"mesh {mesh.name!r}: vertex group {name!r} has a bone's name; it is skipped")
+            continue
+        group = obj.vertex_groups.new(name=name)
+        for weight in np.unique(weights[weights != 0]):
+            group.add(np.flatnonzero(weights == weight).tolist(), float(weight), "REPLACE")
 
 
 def _splats(splats: GaussianSplats) -> bpy.types.PointCloud:
