@@ -74,13 +74,14 @@ SLIDER_LIMIT = 10.0  # Blender's widest shape key slider range is -10..10
 def write_blend(scene: Scene, path: str, *, pack_images: bool = False, scripts=()) -> None:
     """Replace Blender's current data with `scene` and save it to `path` (plus `<name>_cache.usdc` beside it
     when meshes have per-vertex animation). `pack_images`: pack the texture images found on disk.
-    `scripts`: (path, source) pairs of Python run, in order, as __main__ before saving."""
+    `scripts`: (path, source, params) of Python run, in order, as __main__ before saving, with `params` as
+    the global `params`."""
     bpy.ops.wm.read_factory_settings(use_empty=True)
     target = Path(path).resolve()
     scene_to_blender(scene, cache_path=target.with_name(f"{target.stem}_cache.usdc"), blend_path=target,
                      pack_images=pack_images)  # fmt: skip
-    for script_path, source in scripts:
-        exec(compile(source, script_path, "exec"), {"__name__": "__main__", "__file__": script_path})
+    for script_path, source, params in scripts:
+        exec(compile(source, script_path, "exec"), {"__name__": "__main__", "__file__": script_path, "params": params})
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     bpy.ops.wm.save_as_mainfile(filepath=str(Path(path).resolve()), check_existing=False)
 

@@ -687,4 +687,7 @@ aren't written, so they're never dropped silently.
   the scene is built and before saving, as `__main__`, for scene-specific setup
   that isn't file conversion (node trees, modifiers, object settings). One
   Blender run instead of a second one that reopens and resaves the file; the
-  scripts' errors come back as BlenderError like the rest of the save.
+  scripts' errors come back as BlenderError like the rest of the save. A
+  script given as `(path, params)` reads `params` as a global dict (pickled
+  across with the scene), so one script can serve several files; a plain
+  path gets an empty one.

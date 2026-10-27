@@ -163,6 +163,7 @@ sceneport.save(scene, "scene.blend")                  # Z-up meters, as Blender'
 sceneport.save(scene, "scene.blend", blender="/Applications/Blender.app")
 sceneport.save(scene, "scene.blend", pack_images=True)  # texture images stored inside the .blend
 sceneport.save(scene, "scene.blend", scripts=["setup.py"])  # your bpy setup, run before saving
+sceneport.save(scene, "scene.blend", scripts=[("setup.py", {"albedo": "albedo.png"})])  # read as `params` in it
 ```
 
 Blender is found from `blender=` (an executable, or the `.app` on macOS), then

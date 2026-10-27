@@ -8,7 +8,7 @@ scene for Blender (pure numpy). Nothing is installed into Blender.
 from __future__ import annotations
 
 import os
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 from ...scene.types import Scene
@@ -22,7 +22,7 @@ def save(
     blender: Blender | str | os.PathLike | None = None,
     timeout: float | None = None,
     pack_images: bool = False,
-    scripts: Sequence[str | os.PathLike] = (),
+    scripts: Sequence[str | os.PathLike | tuple[str | os.PathLike, Mapping]] = (),
 ) -> None:
     """Write `scene` as a .blend file with an installed Blender (see find_blender for `blender`).
 
@@ -43,9 +43,12 @@ def save(
     is saved, in order, as `__main__` (with `__file__` set), for setup sceneport doesn't do itself:
     node trees, modifiers, object settings. They run with Blender's own Python and bpy, see the
     scene's objects by their node names, and shouldn't save the file themselves (`bpy.data.filepath`
-    is still empty then). Their errors and warnings come back as from the rest of the save.
+    is still empty then). Their errors and warnings come back as from the rest of the save. A script given
+    as (path, params) sees `params` (a dict, pickled across, so plain values, paths and arrays) as the
+    global `params`; one given as a path sees an empty dict.
     """
-    sources = [(str(Path(script).resolve()), Path(script).read_text()) for script in scripts]
+    entries = [script if isinstance(script, tuple) else (script, {}) for script in scripts]
+    sources = [(str(Path(script).resolve()), Path(script).read_text(), dict(params)) for script, params in entries]
     payload = {"scene": scene, "path": str(Path(path).resolve()), "pack_images": pack_images, "scripts": sources}
     run_in_blender("write_blend", payload, blender=blender, timeout=timeout)
 

@@ -65,6 +65,16 @@ def test_scripts_run_before_saving(blender, tmp_path):
                          capture_output=True, text=True)  # fmt: skip
     assert "REST True ['ran___main___unsaved']" in run.stdout
 
+    # (path, params): the script reads them as the global `params`; a plain path gets an empty dict.
+    named = tmp_path / "named.py"
+    named.write_text("import bpy\nbpy.data.texts.new(params.get('name', 'unnamed'))\n")
+    sceneport.save(Scene(nodes=[Node("tri", mesh=triangle)]), tmp_path / "tri.blend", blender=blender,
+                   scripts=[(named, {"name": "from_params"}), named])  # fmt: skip
+    check = "import bpy; print('TEXTS', sorted(t.name for t in bpy.data.texts))"
+    run = subprocess.run([str(blender.path), "-b", "--factory-startup", str(tmp_path / "tri.blend"), "--python-expr", check],
+                         capture_output=True, text=True)  # fmt: skip
+    assert "TEXTS ['from_params', 'unnamed']" in run.stdout
+
     (tmp_path / "broken.py").write_text("raise ValueError('setup failed')\n")
     with pytest.raises(BlenderError, match="setup failed"):
         sceneport.save(Scene(nodes=[Node("tri", mesh=triangle)]), tmp_path / "tri.blend", blender=blender,

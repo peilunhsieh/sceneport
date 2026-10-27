@@ -38,7 +38,7 @@ def ping(payload: dict | None) -> dict:
 
 def write_blend(payload: dict) -> None:
     """Save payload["scene"] as the .blend payload["path"] (packing images when payload["pack_images"],
-    running payload["scripts"], [(path, source)], before saving)."""
+    running payload["scripts"], [(path, source, params)], before saving)."""
     from .to_blend import write_blend
 
     write_blend(payload["scene"], payload["path"], pack_images=payload.get("pack_images", False),
