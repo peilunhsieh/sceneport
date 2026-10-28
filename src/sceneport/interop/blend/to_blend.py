@@ -33,7 +33,8 @@ extras["blender"] values are set on the collection where it has that property
 inverse that cancels Blender's offset to the bone's tail.
 
 Cameras and lights become camera / light objects and the first dome light the
-World (cameras_lights.py), the first camera the scene's; their animated settings
+World (cameras_lights.py), the render settings' camera (else the first) the
+scene's, with the render settings' resolution; their animated settings
 are F-curves on the camera / light data, and a dome's turning or brightness is
 sampled onto the World's nodes.
 
@@ -65,6 +66,7 @@ from ...scene.types import Mesh, Node, Primvar, Scene
 from . import cameras_lights
 from .materials import MaterialWriter, assign
 from .cache import moving, write_point_cache
+from ..export import check_render
 from ..reframe import key_times
 from .compat import Rig, pose_tracks, prepare, rigs
 
@@ -100,6 +102,7 @@ def scene_to_blender(
     will be saved, when given (else to the open .blend, or absolute). `pack_images`: pack the texture
     images found on disk into the .blend (embedded ones always are)."""
     _warn_unsupported(scene)
+    check_render(scene)
     scene = prepare(scene)
     collection = collection or bpy.context.scene.collection
     weights = _shape_weights(scene)
@@ -170,14 +173,22 @@ def scene_to_blender(
             data.use_fake_user = True
     cameras = [node for node in objects if node.camera is not None and objects[node].type == "CAMERA"]
     if cameras:
-        cameras_lights.use_camera(objects[cameras[0]], cameras[0].camera)
-        others = [c.name for c in cameras[1:] if c.camera.exposure != cameras[0].camera.exposure]
+        rendered = scene.render_camera()
+        if rendered not in cameras:  # e.g. a node that's also a mesh: not a Blender camera
+            if scene.render is not None and scene.render.camera is not None:
+                warnings.warn(f"render: camera {rendered.name!r} isn't a Blender camera; "
+                              f"{cameras[0].name!r} is the scene camera")  # fmt: skip
+            rendered = cameras[0]
+        cameras_lights.use_camera(objects[rendered], rendered.camera, scene.render)
+        others = [c.name for c in cameras if c is not rendered and c.camera.exposure != rendered.camera.exposure]
         if others:
             warnings.warn(f"cameras {others[:3]}{'...' if len(others) > 3 else ''}: Blender has one exposure for the "
-                          f"view, the scene camera's ({cameras[0].name!r}); theirs isn't written")  # fmt: skip
+                          f"view, the scene camera's ({rendered.name!r}); theirs isn't written")  # fmt: skip
+    elif scene.render is not None:
+        cameras_lights.use_render(scene.render)
     world_matrices = scene.world_matrices()
     if domes:
-        cameras_lights.world_from_dome(domes[0].light, world_matrices[domes[0]][:3, :3], blend_dir)
+        cameras_lights.world_from_dome(domes[0].light, world_matrices[domes[0]][:3, :3], blend_dir, pack_images=pack_images)
         if len(domes) > 1:
             warnings.warn(f"Blender has one World: dome lights {[d.name for d in domes[1:]]} are skipped")
 

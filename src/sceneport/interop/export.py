@@ -36,6 +36,20 @@ def warn_dropped(scene: Scene, format_name: str, *, materials: bool = True, spla
         warnings.warn(f"{format_name} can't hold {', '.join(dropped)}; they are not written (meshes are baked as posed)")
 
 
+def check_render(scene: Scene) -> Node | None:
+    """Validate the render settings and return the camera node rendered (None without a camera), warning
+    when the image's aspect isn't the camera's film aspect: formats fit the film to the image differently."""
+    scene.validate_render()
+    camera = scene.render_camera()
+    if scene.render is not None and camera is not None:
+        film = camera.camera.horizontal_aperture / camera.camera.vertical_aperture
+        if not np.isclose(scene.render.aspect_ratio, film, rtol=1e-3):
+            warnings.warn(f"render: the image's aspect ({scene.render.aspect_ratio:.4g}) isn't camera {camera.name!r}'s "
+                          f"film aspect ({film:.4g}); Blender and FBX keep the film's width, USD expands the film to "
+                          "cover the image")  # fmt: skip
+    return camera
+
+
 def warn_splats(scene: Scene, format_name: str) -> None:
     """Warn that the format's writer doesn't write Gaussian splats (yet), so they aren't dropped silently."""
     if any(node.splats is not None for node, _ in scene.walk()):

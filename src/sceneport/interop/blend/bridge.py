@@ -101,7 +101,8 @@ def inspect_blend(payload: dict) -> dict:
         environment = nodes.get("ShaderNodeTexEnvironment")
         return {"nodes": sorted(nodes), "strength": background.inputs["Strength"].default_value if background else None,
                 "mapping": (mapping.vector_type, tuple(mapping.inputs["Rotation"].default_value)) if mapping else None,
-                "image": environment.image.filepath if environment and environment.image else None}  # fmt: skip
+                "image": environment.image.filepath if environment and environment.image else None,
+                "packed": bool(environment and environment.image and environment.image.packed_file)}  # fmt: skip
 
     scene = bpy.context.scene
     out = []
@@ -204,6 +205,7 @@ def inspect_blend(payload: dict) -> dict:
         "materials": {m.name: _material_summary(m) for m in bpy.data.materials if m.node_tree is not None},
         "scene_camera": scene.camera.name if scene.camera else None,
         "render": (scene.render.resolution_x, scene.render.resolution_y),
+        "pixel_aspect": (scene.render.pixel_aspect_x, scene.render.pixel_aspect_y),
         "frames": frames,
     }
 

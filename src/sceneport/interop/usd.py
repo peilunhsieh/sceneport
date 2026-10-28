@@ -48,6 +48,11 @@ and purpose-less bindings); "materialBind" GeomSubsets become the node's
 material slots and the mesh's per-face material_indices. Writing binds slot 0
 to the mesh, or, with material_indices, one GeomSubset per slot.
 
+Render settings: a RenderSettings prim under /Render (USD's convention), named by the stage's
+renderSettingsPrimPath, with the resolution, pixel aspect ratio and a camera relationship to the camera
+rendered (the scene's first camera when the settings name none). Reading takes that prim, or the first
+RenderSettings prim.
+
 USD only records the up axis (Y or Z); front and right axes are implied
 (+Z/+X for Y up, -Y/+X for Z up). Points and weights are stored as float32.
 """
@@ -62,7 +67,7 @@ from pathlib import Path
 
 import numpy as np
 from numpy.typing import NDArray
-from pxr import Gf, Sdf, Tf, Usd, UsdGeom, UsdLux, UsdShade, UsdSkel, UsdUtils, Vt
+from pxr import Gf, Sdf, Tf, Usd, UsdGeom, UsdLux, UsdRender, UsdShade, UsdSkel, UsdUtils, Vt
 
 from ..math import (
     ROTATION_ORDERS,
@@ -78,10 +83,10 @@ from ..scene.camera import Camera
 from ..scene.light import Light
 from ..scene.material import AssetPath, Connection, Material, NodeGraph, Port, ShaderNode
 from ..scene.pbr import NATIVE_SURFACES, native_surface, preview_surface_nodes
-from .export import texture_path, warn_splats
+from .export import check_render, texture_path, warn_splats
 from .reframe import mirrored_joints, reframe, unmirror
 from .fbx.materials import inferred_fbx_type
-from ..scene.types import BlendShape, Collection, Inbetween, Mesh, Node, Primvar, Scene, Skin, Transform
+from ..scene.types import BlendShape, Collection, Inbetween, Mesh, Node, Primvar, RenderSettings, Scene, Skin, Transform
 
 EXTENSIONS = (".usd", ".usda", ".usdc", ".usdz")
 NAME_KEY = "sceneport:name"  # customData: a primvar's original name
@@ -285,6 +290,7 @@ class _Writer:
         self.bindings: list[tuple[UsdGeom.Mesh, Mesh, _SkeletonPlan]] = []
         self.node_paths: dict[Node, Sdf.Path] = {}  # non-joint node -> its prim
         scene.validate_collections()
+        self.render_camera = check_render(scene)  # the camera node rendered, if any
         self.own_skeletons: list[_SkeletonPlan] = []  # jointless skeletons of unskinned blend shape meshes
         for clip in scene.animations:
             clip.validate()
@@ -388,7 +394,27 @@ class _Writer:
         self._write_materials(default if default is not None else Sdf.Path.absoluteRootPath)
         if self.scene.collections:
             self._write_collections(default)
+        if self.scene.render is not None:
+            self._write_render()
         self._finish()
+
+    def _write_render(self) -> None:
+        """The render settings as a RenderSettings prim in a /Render scope, named by the stage's
+        renderSettingsPrimPath: resolution, pixel aspect ratio and a relationship to the camera rendered."""
+        render = self.scene.render
+        taken = {prim.GetName() for prim in self.stage.GetPseudoRoot().GetChildren()}
+        scope = Sdf.Path.absoluteRootPath.AppendChild(_prim_name("Render", taken))
+        UsdGeom.Scope.Define(self.stage, scope)
+        settings = UsdRender.Settings.Define(self.stage, scope.AppendChild("RenderSettings"))
+        settings.CreateResolutionAttr(Gf.Vec2i(int(render.resolution[0]), int(render.resolution[1])))
+        settings.CreatePixelAspectRatioAttr(float(render.pixel_aspect_ratio))
+        if self.render_camera is not None:
+            if self.render_camera in self.node_paths:
+                settings.CreateCameraRel().SetTargets([self.node_paths[self.render_camera]])
+            else:
+                warnings.warn(f"render: camera {self.render_camera.name!r} has no prim of its own; the render "
+                              "settings name no camera")  # fmt: skip
+        self.stage.SetMetadata("renderSettingsPrimPath", str(settings.GetPath()))
 
     def _write_collections(self, owner: Sdf.Path | None) -> None:
         """Every collection as a UsdCollectionAPI on the default prim (explicitOnly: members' descendants aren't
@@ -1236,6 +1262,22 @@ class _Reader:
             mesh.skin = self.read_skin(prim, mesh)
         scene.animations = self.read_animations(stage)
         scene.collections = self.read_collections(stage)
+        scene.render = self.read_render(stage)
+
+    def read_render(self, stage: Usd.Stage) -> RenderSettings | None:
+        """The stage's render settings (its renderSettingsPrimPath, else the first RenderSettings prim), the
+        camera being the node read from the camera prim it names."""
+        settings = UsdRender.Settings.GetStageRenderSettings(stage)
+        if not settings:
+            prim = next((p for p in stage.Traverse(_PREDICATE) if p.IsA(UsdRender.Settings)), None)
+            if prim is None:
+                return None
+            settings = UsdRender.Settings(prim)
+        width, height = settings.GetResolutionAttr().Get()
+        targets = settings.GetCameraRel().GetForwardedTargets()
+        cameras = [node for path in targets for node in self.nodes_by_path.get(path, []) if node.camera is not None]
+        return RenderSettings((int(width), int(height)), float(settings.GetPixelAspectRatioAttr().Get()),
+                              cameras[0] if cameras else None)  # fmt: skip
 
     def read_collections(self, stage: Usd.Stage) -> list[Collection]:
         """The UsdCollectionAPI collections on the default prim (linking collections skipped). sceneport's own

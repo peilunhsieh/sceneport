@@ -523,6 +523,27 @@ class Collection:
         return list(dict.fromkeys(node for collection in self.walk() for node in collection.nodes))
 
 
+@dataclass
+class RenderSettings:
+    """How the scene is rendered: the image size in pixels and the camera it's rendered from (USD's
+    RenderSettings prim, Blender's scene render resolution and scene camera, FBX's camera resolution and
+    DefaultCamera).
+
+    The image's aspect (`aspect_ratio`) and the camera's film aspect are independent; where they differ,
+    formats fit the film to the image differently (Blender and FBX keep the film's width, USD expands the
+    film to cover the image), so keep them equal.
+    """
+
+    resolution: tuple[int, int] = (1920, 1080)  # pixels, (width, height)
+    pixel_aspect_ratio: float = 1.0  # a pixel's width / its height
+    camera: Node | None = None  # the camera node rendered; None: the scene's first camera
+
+    @property
+    def aspect_ratio(self) -> float:
+        """The image's width / height, its pixel aspect included."""
+        return self.resolution[0] * self.pixel_aspect_ratio / self.resolution[1]
+
+
 AXES = ("+X", "-X", "+Y", "-Y", "+Z", "-Z")
 
 
@@ -545,6 +566,7 @@ class Scene:
     animations: list[Animation] = field(default_factory=list)  # clips, see scene/animation.py
     materials: list[Material] = field(default_factory=list)  # every material, bound or not; see scene/material.py
     collections: list[Collection] = field(default_factory=list)  # top-level collections; see Collection
+    render: RenderSettings | None = None  # image size and camera; None: unset, each format keeps its default
 
     def __post_init__(self):
         for name in ("up_axis", "front_axis", "right_axis"):
@@ -607,6 +629,24 @@ class Scene:
 
     def find_collection(self, name: str) -> Collection | None:
         return next((c for c in self.all_collections() if c.name == name), None)
+
+    def render_camera(self) -> Node | None:
+        """The camera node rendered: render.camera if set, else the first camera node (depth first), else None."""
+        if self.render is not None and self.render.camera is not None:
+            return self.render.camera
+        return next((node for node, _ in self.walk() if node.camera is not None), None)
+
+    def validate_render(self) -> None:
+        """Raise if the render settings' camera isn't a camera node in the scene or the resolution isn't positive."""
+        if self.render is None:
+            return
+        width, height = self.render.resolution
+        if width < 1 or height < 1 or self.render.pixel_aspect_ratio <= 0:
+            raise ValueError(f"render: resolution {self.render.resolution} and pixel aspect ratio "
+                             f"{self.render.pixel_aspect_ratio} must be positive")  # fmt: skip
+        camera = self.render.camera
+        if camera is not None and (camera.camera is None or camera not in {node for node, _ in self.walk()}):
+            raise ValueError(f"render: camera {camera.name!r} isn't a camera node in the scene")
 
     def validate_collections(self) -> None:
         """Raise if a collection lists a node that isn't in the scene, or collections nest in a loop."""

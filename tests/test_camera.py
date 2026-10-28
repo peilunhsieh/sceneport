@@ -129,3 +129,62 @@ def test_look_at_matrix_aims_minus_z_at_the_target():
     np.testing.assert_allclose(Transform(*decompose_matrix(m)).matrix(), m, atol=1e-12)
     with pytest.raises(ValueError):
         look_at_matrix([0, 0, 0], [0, 1, 0])
+
+
+# -- render settings ----------------------------------------------------------------------------
+
+from sceneport.scene import RenderSettings  # noqa: E402
+
+
+def render_scene() -> Scene:
+    """Two 16:9 cameras, the second rendered at 1280 x 720."""
+    front = Node("Front", Transform(translation=[0, 0, 5]), camera=Camera(**LENS))
+    side = Node("Side", Transform(translation=[5, 0, 0], rotation=[0, 90, 0]), camera=Camera(**LENS))
+    return Scene(nodes=[Node("Rig", children=[front, side])], render=RenderSettings((1280, 720), 1.0, side))
+
+
+def test_usd_render_settings():
+    scene = render_scene()
+    stage = stage_from_scene(scene)
+    from pxr import UsdRender
+
+    settings = UsdRender.Settings.GetStageRenderSettings(stage)
+    assert settings.GetPath() == "/Render/RenderSettings"
+    assert tuple(settings.GetResolutionAttr().Get()) == (1280, 720)
+    assert settings.GetCameraRel().GetTargets() == ["/Rig/Side"]
+    back = scene_from_stage(stage)
+    assert back.render.resolution == (1280, 720) and back.render.pixel_aspect_ratio == 1.0
+    assert back.render.camera is back.find("Side")
+    assert [node.name for node in back.nodes] == ["Rig"]  # the /Render scope isn't a node
+
+
+def test_fbx_render_settings():
+    scene = render_scene()
+    doc = document_from_scene(scene)
+    assert doc.global_settings.get("DefaultCamera") == "Side"
+    for attribute in (o for o in doc.iter_objects("NodeAttribute") if o.subtype == "Camera"):  # every camera, as Blender
+        assert (attribute.props.get("AspectRatioMode"), attribute.props.get("AspectWidth"),
+                attribute.props.get("AspectHeight")) == (2, 1280.0, 720.0)  # fmt: skip
+    back = scene_from_document(FBXDocument.from_file(loads(dumps(doc.to_file()))))
+    assert back.render.resolution == (1280, 720)
+    assert back.render.camera is back.find("Side")  # the turned copy of the camera node
+
+
+def test_render_settings_default_to_the_first_camera_and_none():
+    scene = render_scene()
+    scene.render.camera = None
+    assert scene.render_camera() is scene.find("Front")
+    assert scene_from_stage(stage_from_scene(scene)).render.camera.name == "Front"
+    assert scene_from_stage(stage_from_scene(camera_scene())).render is None
+    assert scene_from_document(document_from_scene(camera_scene())).render is None
+
+
+def test_render_settings_are_checked():
+    scene = render_scene()
+    scene.render.camera = scene.find("Rig")  # not a camera
+    with pytest.raises(ValueError, match="isn't a camera node"):
+        stage_from_scene(scene)
+    scene = render_scene()
+    scene.render.resolution = (1280, 960)  # 4:3 against 16:9 film
+    with pytest.warns(UserWarning, match="film aspect"):
+        stage_from_scene(scene)

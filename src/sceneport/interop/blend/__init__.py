@@ -35,8 +35,8 @@ def save(
     are written too. Scripts in scene.extras["blender"]["texts"] ({name: source}) are saved as Text
     datablocks, run on demand from Blender's Text Editor.
 
-    Texture images are referenced by paths relative to the .blend; with `pack_images` the ones found on
-    disk are packed into it too (they keep those paths, where Blender's Unpack Resources puts them).
+    Texture images (materials' and the World's environment image) are referenced by paths relative to the
+    .blend; with `pack_images` the ones found on disk are packed into it too (they keep those paths, where Blender's Unpack Resources puts them).
     Images embedded in the source (FBX) are always packed.
 
     `scripts`: Python files run inside the same Blender after the scene is built and before the file

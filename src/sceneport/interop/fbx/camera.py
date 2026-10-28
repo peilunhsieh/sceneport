@@ -5,6 +5,11 @@ FocalLength (mm), FilmWidth / FilmHeight / FilmOffsetX / FilmOffsetY (inches),
 NearPlane / FarPlane / FocusDistance (scene units), CameraProjectionType (0
 perspective, 1 orthographic). FBX cameras look down their node's +X axis; the
 -Z <-> +X turn is done on the nodes (interop/reframe.py), not here.
+
+Render settings: FBX has no scene resolution; like Blender's exporter, every
+camera gets it (AspectRatioMode 2, fixed resolution; AspectWidth / AspectHeight
+in pixels; PixelAspectRatio), and GlobalSettings' DefaultCamera names the camera
+rendered.
 """
 
 from __future__ import annotations
@@ -13,11 +18,12 @@ import math
 import warnings
 
 from ...scene.camera import Camera
-from ...scene.types import Node
+from ...scene.types import Node, RenderSettings
 from .binary.node import FBXNode, Prop
 from .document import FBXDocument, FBXObject, Properties70, Property
 
 MM_PER_INCH = 25.4
+FIXED_RESOLUTION = 2  # AspectRatioMode: AspectWidth / AspectHeight are the resolution in pixels
 # Animatable Camera field -> (FBX property, factor from sceneport's value to FBX's). f_stop has no FBX property.
 ANIMATED_PROPERTIES = {
     "focal_length": ("FocalLength", 1.0), "horizontal_aperture": ("FilmWidth", 1 / MM_PER_INCH),
@@ -63,14 +69,37 @@ def read_camera(doc: FBXDocument, model: FBXObject) -> Camera | None:
     )
 
 
-def write_camera(doc: FBXDocument, node: Node) -> FBXObject:
-    """The NodeAttribute of a camera node, laid out as Blender writes it."""
+def read_render(doc: FBXDocument, cameras: dict[int, Node]) -> RenderSettings | None:
+    """The render settings, from `cameras` (camera Model id -> its node): the camera GlobalSettings'
+    DefaultCamera names, if it's one of them, else the first with a fixed resolution, and that camera's
+    resolution and pixel aspect ratio. None when no camera has a fixed resolution."""
+    default = doc.global_settings.get("DefaultCamera", "")
+    ordered = sorted(cameras.items(), key=lambda item: cameras[item[0]].name != default)  # DefaultCamera's first
+    for model_id, node in ordered:
+        attribute = next((a for a in doc.children_of(doc.objects[model_id], "NodeAttribute") if a.subtype == "Camera"), None)
+        if attribute is None or int(doc.get_property(attribute, "AspectRatioMode", 0)) != FIXED_RESOLUTION:
+            continue
+        width, height = (round(float(doc.get_property(attribute, name, 0.0))) for name in ("AspectWidth", "AspectHeight"))
+        if width < 1 or height < 1:
+            continue
+        return RenderSettings((width, height), float(doc.get_property(attribute, "PixelAspectRatio", 1.0)),
+                              node if node.name == default else None)  # fmt: skip
+    return None
+
+
+def write_camera(doc: FBXDocument, node: Node, render: RenderSettings | None = None) -> FBXObject:
+    """The NodeAttribute of a camera node, laid out as Blender writes it, with the image `render` gives."""
     camera = node.camera
     if camera.exposure != 0.0:
         warnings.warn(f"camera {node.name!r}: FBX has no camera exposure; its {camera.exposure:+g} stops aren't written")
     width, height = camera.horizontal_aperture / MM_PER_INCH, camera.vertical_aperture / MM_PER_INCH
     props = Properties70()
     props.set("CameraProjectionType", "enum", 1 if camera.projection == "orthographic" else 0)
+    if render is not None:
+        props.set("AspectRatioMode", "enum", FIXED_RESOLUTION)
+        props.set("AspectWidth", "double", float(render.resolution[0]))
+        props.set("AspectHeight", "double", float(render.resolution[1]))
+        props.set("PixelAspectRatio", "double", float(render.pixel_aspect_ratio))
     props.set("FocalLength", "double", camera.focal_length)
     props.set("FilmWidth", "double", width)
     props.set("FilmHeight", "double", height)

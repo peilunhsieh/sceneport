@@ -241,3 +241,34 @@ def test_scene_camera_exposure_is_the_view_exposure(blender, tmp_path):
     assert result["scene_camera"] == "Cam"
     assert [result["frames"][f]["_exposure"] for f in (0, 12, 24)] == pytest.approx([2.0, 0.5, -1.0], abs=1e-5)
     assert "view_settings.exposure" in result["actions"][0]["fcurves"]
+
+
+def test_render_settings(blender, tmp_path):
+    """The render settings' camera is the scene camera (not the first) at their resolution and pixel aspect."""
+    from sceneport.scene import RenderSettings
+
+    front = Node("Front", Transform(translation=[0, 0, 5]), camera=Camera(horizontal_aperture=36.0, vertical_aperture=24.0))
+    side = Node("Side", Transform(translation=[5, 0, 0]), camera=Camera(horizontal_aperture=36.0, vertical_aperture=24.0))
+    scene = Scene(nodes=[front, side], render=RenderSettings((900, 1200), 2.0, side))  # 1800:1200 = the 3:2 film
+    sceneport.save(scene, tmp_path / "render.blend", blender=blender)
+    result = inspect(blender, tmp_path / "render.blend")
+    assert result["scene_camera"] == "Side" and result["render"] == (900, 1200) and result["pixel_aspect"] == (2.0, 1.0)
+
+    scene.render = RenderSettings((640, 480), 0.5)  # no camera named: the first; pixels taller than wide
+    scene.nodes[0].camera.vertical_aperture = 36.0 * 480 / 320
+    sceneport.save(scene, tmp_path / "render.blend", blender=blender)
+    result = inspect(blender, tmp_path / "render.blend")
+    assert result["scene_camera"] == "Front" and result["render"] == (640, 480) and result["pixel_aspect"] == (1.0, 2.0)
+
+
+def test_dome_image_packed(blender, tmp_path):
+    """With pack_images the World's environment image is packed into the .blend, keeping its relative path."""
+    hdri = tmp_path / "sky" / "tiny.hdr"  # a 4 x 2 Radiance HDR, uncompressed RGBE scanlines
+    hdri.parent.mkdir()
+    hdri.write_bytes(b"#?RADIANCE\nFORMAT=32-bit_rle_rgbe\n\n-Y 2 +X 4\n" + bytes([128, 128, 128, 129]) * 8)
+    scene = Scene(nodes=[Node("Tri", mesh=Mesh("tri", [[0, 0, 0], [1, 0, 0], [0, 1, 0]], [3], [0, 1, 2]))])
+    scene.add_environment(hdri)
+    for pack in (False, True):
+        sceneport.save(scene, tmp_path / "env.blend", blender=blender, pack_images=pack)
+        world = inspect(blender, tmp_path / "env.blend")["world"]
+        assert world["packed"] is pack and world["image"] == "//sky/tiny.hdr"

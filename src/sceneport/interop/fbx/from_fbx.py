@@ -13,7 +13,7 @@ from .animation import fps_from_settings, read_animations
 from .blendshapes import read_blend_shapes
 from .binary import read
 from .document import FBXDocument, FBXObject
-from .camera import read_camera
+from .camera import read_camera, read_render
 from ..reframe import reframe
 from .compat import CAMERA_TO_FBX, LIGHT_TO_FBX
 from .light import read_light
@@ -74,6 +74,7 @@ def scene_from_document(doc: FBXDocument, directory: str | None = None) -> Scene
     for geom_id, mesh in meshes.items():
         mesh.skin = read_skin(doc, doc.objects[geom_id], mesh.n_vertices, nodes)
     scene.animations = read_animations(doc, nodes, shapes, fps_from_settings(doc.global_settings), attributes)
+    scene.render = read_render(doc, {model_id: node for model_id, node in nodes.items() if node.camera is not None})
     # FBX cameras look down +X and lights shine down -Y; sceneport's both down -Z.
     frames = {node: np.linalg.inv(CAMERA_TO_FBX) for node in nodes.values() if node.camera is not None}
     frames.update({node: np.linalg.inv(LIGHT_TO_FBX) for node in nodes.values() if node.light is not None})

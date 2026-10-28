@@ -59,6 +59,8 @@ def write_global_settings(scene: Scene) -> Properties70:
         value, direction = axis_value(getattr(scene, field))
         settings.set(axis, "int", value)
         settings.set(sign, "int", direction)
+    if scene.render is not None and (camera := scene.render_camera()) is not None:
+        settings.set("DefaultCamera", "KString", camera.name)
     if scene.animations:  # frame rate and time span of the first clip
         clip = scene.animations[0]
         mode, custom = time_mode_for(clip.fps)

@@ -10,7 +10,7 @@ a converter around it:
 
 | Package | Responsibility |
 |---|---|
-| `sceneport.scene` | Plain numpy data classes: Scene, Node, Mesh, Primvar, Transform, Material, Camera, Light, GaussianSplats |
+| `sceneport.scene` | Plain numpy data classes: Scene, Node, Mesh, Primvar, Transform, Material, Camera, Light, RenderSettings, GaussianSplats |
 | `sceneport.interop.fbx` | Native FBX read/write |
 | `sceneport.interop.usd` | USD read/write (`.usd`, `.usda`, `.usdc`, `.usdz`) via usd-core |
 | `sceneport.interop.obj`, `sceneport.interop.ply` | OBJ (+ MTL) and PLY read/write |
@@ -96,6 +96,8 @@ splats.transformed(matrix)               # moved by a 4x4 matrix, axes and SH co
 # Cameras: lens settings on a node, looking down its -Z; look_at_matrix aims one
 from sceneport.math import decompose_matrix, look_at_matrix
 camera = Node("camera", Transform(*decompose_matrix(look_at_matrix(eye, target))), camera=Camera(focal_length=50.0))
+# Render settings (USD, FBX, .blend): image size in pixels and the camera rendered (default: the first)
+scene.render = RenderSettings(resolution=(1920, 1080), pixel_aspect_ratio=1.0, camera=camera)
 
 sceneport.save(scene, "out.fbx")
 ```
@@ -161,7 +163,7 @@ isn't supported yet.
 ```python
 sceneport.save(scene, "scene.blend")                  # Z-up meters, as Blender's own data
 sceneport.save(scene, "scene.blend", blender="/Applications/Blender.app")
-sceneport.save(scene, "scene.blend", pack_images=True)  # texture images stored inside the .blend
+sceneport.save(scene, "scene.blend", pack_images=True)  # texture and environment images stored inside the .blend
 sceneport.save(scene, "scene.blend", scripts=["setup.py"])  # your bpy setup, run before saving
 sceneport.save(scene, "scene.blend", scripts=[("setup.py", {"albedo": "albedo.png"})])  # read as `params` in it
 ```
@@ -190,7 +192,7 @@ up, meters), so objects carry no extra rotation.
 | Joints and skins | One armature per joint tree, bones resting in the bind pose and posed as the scene is; vertex groups and an Armature modifier, with the mesh a child of its armature |
 | Animation | One action per clip: the first is assigned and sets the scene's fps and frame range, the others are kept with a fake user (switch in Blender) |
 | Per-vertex animation | A `<name>_cache.usdc` beside the .blend, read by Mesh Sequence Cache modifiers: keep the two files together |
-| Cameras and lights | Cameras and lights with their animated settings; the first camera is the scene's camera (its `exposure`, in stops, is the view's exposure: Blender has none per camera), the first dome light the World |
+| Cameras and lights | Cameras and lights with their animated settings; the render settings' camera (else the first) is the scene's camera, at the render settings' resolution and pixel aspect (its `exposure`, in stops, is the view's exposure: Blender has none per camera), the first dome light the World |
 | Materials | Principled BSDF setups built from each material's PBR reading (textures, UV transforms, channels, normal maps); images are linked by paths relative to the .blend, or packed into it with `pack_images=True`; images embedded in an FBX are always packed |
 | Gaussian splats | Point clouds with Blender 5.3's splat attributes (position, scale, rotation, radiance:base, radiance:sh_*), marked as splats on Blender 5.3+ and plain points on 5.2; view-dependent colors turned to Z-up |
 | Collections | Blender collections, nested the same way |
@@ -204,7 +206,7 @@ where its result would be wrong:
 - Opacity is coverage (Alpha), as Blender's FBX and glTF importers read
   transparency; the USD importer reads it as glass (Transmission).
 - A sun's angle is used as is (USD's angular diameter); the importer doubles it.
-- The render size follows the scene camera's film aspect.
+- Without render settings, the render size is 1920 wide with the scene camera's film aspect.
 - EEVEE's light threshold is lowered when dim, physically scaled lights would
   otherwise be cut off and render black in EEVEE while Cycles lights them.
 

@@ -25,7 +25,7 @@ FLIP[3, 3] = 1.0  # -I on the linear part: a point reflection
 def copy_scene(scene: Scene, meshes: dict[int, Mesh], transforms: dict[Node, Transform], channels) -> Scene:
     """A copy with new Nodes (transforms from `transforms` where given), meshes replaced per `meshes`
     (every skinned mesh is copied so its skin points at the new joints), each clip's channels
-    from `channels(clip)`, re-targeted to the copies, and collections listing the copies."""
+    from `channels(clip)`, re-targeted to the copies, and collections and the render camera naming the copies."""
     node_map: dict[Node, Node] = {}
 
     def copy_node(node: Node) -> Node:
@@ -62,7 +62,10 @@ def copy_scene(scene: Scene, meshes: dict[int, Mesh], transforms: dict[Node, Tra
         for clip in scene.animations
     ]  # fmt: skip
     collections = [copy_collection(c) for c in scene.collections]
-    return dataclasses.replace(scene, nodes=roots, animations=animations, collections=collections)
+    render = scene.render
+    if render is not None and render.camera is not None:
+        render = dataclasses.replace(render, camera=node_map.get(render.camera))
+    return dataclasses.replace(scene, nodes=roots, animations=animations, collections=collections, render=render)
 
 
 def key_times(clip: Animation, channels: list[Channel]) -> NDArray[np.float64]:

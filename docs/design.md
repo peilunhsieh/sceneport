@@ -351,6 +351,31 @@ future changes can keep them consistent (or revisit them deliberately).
   FBX has none (warned). Blender has no exposure per camera: the scene camera's
   is the view's (Color Management > Exposure), keyed on the scene when animated;
   other cameras' exposure is warned about.
+
+- `Scene.render` (RenderSettings, None when unset): the image size in pixels,
+  the pixel aspect ratio (a pixel's width / height) and the camera node
+  rendered (None: the scene's first camera). One per scene, as USD and Blender
+  hold them. The image aspect and the camera's film aspect are independent;
+  saving warns when they differ, since formats fit the film differently
+  (Blender's horizontal sensor fit and FBX keep the film's width, USD's default
+  conform policy expands the film to cover the image).
+  - USD: a `RenderSettings` prim at /Render/RenderSettings (in a Scope, outside
+    the default prim, as USD's render conventions have it), named by the
+    stage's `renderSettingsPrimPath`: `resolution`, `pixelAspectRatio` and a
+    `camera` relationship, written for the first camera when none is named.
+    Reading takes that prim, else the first RenderSettings prim.
+  - FBX has no scene resolution: every camera gets it, as Blender's exporter
+    writes it (AspectRatioMode 2, fixed resolution; AspectWidth / AspectHeight;
+    PixelAspectRatio), and GlobalSettings' DefaultCamera names the camera
+    rendered. Reading takes DefaultCamera's camera, else the first with a fixed
+    resolution (the render camera then unset: Blender's files name its
+    viewport, "Producer Perspective"). Without cameras nothing is written
+    (warned).
+  - Blender: resolution_x / resolution_y at 100%, pixel_aspect_x /
+    pixel_aspect_y (each at least 1 in Blender), and the scene camera. Without
+    render settings the width is 1920 and the height follows the scene camera's
+    film aspect.
+
 ## Lights
 
 - `Node.light` (scene/light.py): a light on a node, placed and oriented by the

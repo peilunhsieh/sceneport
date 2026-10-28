@@ -11,6 +11,10 @@ through sceneport's .blend or through Blender's USD import of sceneport's USD:
   set; orthographic view width (the horizontal aperture, in mm here meaning
   thousandths of a meter: USD's tenths of a unit) as ortho_scale. Blender's
   cameras look down -Z with +Y up, as sceneport's.
+- Render settings: the resolution (100%) and pixel aspect (pixel_aspect_x /
+  pixel_aspect_y, both at least 1 in Blender) on the scene's render settings, the
+  camera rendered the scene camera. Without render settings the width is 1920 and
+  the height follows the scene camera's film aspect.
 - Lights: energy = intensity x pi (a sun's strength = intensity x 4), with
   exposure, color temperature, normalize and the diffuse / specular factors as
   Blender's own properties; sphere radius = shadow_soft_size, a spot's size =
@@ -29,7 +33,8 @@ through sceneport's .blend or through Blender's USD import of sceneport's USD:
   intensity x 2^exposure), oriented by a Mapping node (point type, XYZ Euler)
   set to R_default @ R^-1 for the dome's world rotation R, R_default being
   Blender's own World orientation as a dome (Euler 90, 0, 90 in Z-up), as
-  Blender's USD importer does. Only the first dome becomes the World.
+  Blender's USD importer does. Only the first dome becomes the World. Its
+  image is packed with `pack_images`, as materials' images are.
 """
 
 from __future__ import annotations
@@ -45,6 +50,7 @@ import numpy as np
 from ...math import euler_from_matrix, euler_matrix
 from ...scene.camera import Camera
 from ...scene.light import Light
+from ...scene.types import RenderSettings
 from ..fbx.light import _watts_per_unit
 
 DEFAULT_WORLD = euler_matrix([90.0, 0.0, 90.0])[:3, :3]  # Blender's World orientation, as a dome's rotation
@@ -96,15 +102,29 @@ def camera_data(camera: Camera, name: str):
     return data
 
 
-def use_camera(obj, camera: Camera) -> None:
-    """Make `obj` the scene's camera, with the render height giving the film's aspect and the view's exposure
-    (Color Management) its exposure: Blender has no exposure per camera."""
+def use_camera(obj, camera: Camera, render: RenderSettings | None = None) -> None:
+    """Make `obj` the scene's camera, with the view's exposure (Color Management) its exposure (Blender has
+    no exposure per camera), and the image `render` gives (see use_render), else one 1920 wide with the
+    film's aspect."""
     scene = bpy.context.scene
     scene.camera = obj
     scene.view_settings.exposure = camera.exposure
+    if render is not None:
+        use_render(render)
+        return
     scene.render.resolution_x = RENDER_WIDTH
     scene.render.resolution_y = max(1, round(RENDER_WIDTH * camera.vertical_aperture / camera.horizontal_aperture))
     scene.render.pixel_aspect_x = scene.render.pixel_aspect_y = 1.0
+
+
+def use_render(render: RenderSettings) -> None:
+    """The scene's render resolution (at 100%) and pixel aspect: Blender's pixel_aspect_x / pixel_aspect_y,
+    each at least 1."""
+    settings = bpy.context.scene.render
+    settings.resolution_x, settings.resolution_y = (int(v) for v in render.resolution)
+    settings.resolution_percentage = 100
+    ratio = render.pixel_aspect_ratio
+    settings.pixel_aspect_x, settings.pixel_aspect_y = (ratio, 1.0) if ratio >= 1 else (1.0, 1 / ratio)
 
 
 def light_data(light: Light, name: str, node_name: str):
@@ -142,8 +162,10 @@ def light_data(light: Light, name: str, node_name: str):
     return data
 
 
-def world_from_dome(light: Light, rotation: np.ndarray, blend_dir: Path | None, name: str = "World"):
-    """The scene's World showing the dome `light` with world rotation `rotation` (3x3, Blender's axes)."""
+def world_from_dome(light: Light, rotation: np.ndarray, blend_dir: Path | None, name: str = "World",
+                    pack_images: bool = False):  # fmt: skip
+    """The scene's World showing the dome `light` with world rotation `rotation` (3x3, Blender's axes), its
+    image packed into the .blend with `pack_images`."""
     world = bpy.data.worlds.new(name)
     bpy.context.scene.world = world
     if world.node_tree is None:  # older Blender: worlds start without nodes (use_nodes goes away in Blender 6)
@@ -165,7 +187,7 @@ def world_from_dome(light: Light, rotation: np.ndarray, blend_dir: Path | None, 
     texture.projection = "MIRROR_BALL" if light.texture_format == "mirroredBall" else "EQUIRECTANGULAR"
     if light.texture_format in ("angular", "cubeMapVerticalCross"):
         warnings.warn(f"Blender's World has no {light.texture_format} environment images; read as lat-long")
-    texture.image = _image(light.texture, blend_dir)
+    texture.image = _image(light.texture, blend_dir, pack_images)
     links.new(coords.outputs["Generated"], mapping.inputs["Vector"])
     links.new(mapping.outputs["Vector"], texture.inputs["Vector"])
     if np.allclose(light.color, 1.0):
@@ -188,10 +210,12 @@ def dome_mapping_rotation(rotation: np.ndarray) -> list[float]:
     return radians[0].tolist() if rotation.ndim == 2 else radians
 
 
-def _image(asset, blend_dir: Path | None):
+def _image(asset, blend_dir: Path | None, pack: bool = False):
     path = asset.resolved or asset.path
     try:
         image = bpy.data.images.load(path, check_existing=True)
+        if pack:  # packed while its path is still absolute; a missing file isn't
+            image.pack()
     except RuntimeError:
         warnings.warn(f"environment image {asset.path!r} not found; the World references it anyway")
         image = bpy.data.images.new(Path(asset.path).name, 1, 1)

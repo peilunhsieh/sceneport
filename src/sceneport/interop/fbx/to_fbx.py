@@ -8,7 +8,7 @@ import warnings
 import numpy as np
 
 from ...scene.types import TRANSFORM_PROPERTIES, Mesh, Node, Scene, Transform
-from ..export import warn_splats, warn_vertex_groups
+from ..export import check_render, warn_splats, warn_vertex_groups
 from . import layers
 from .animation import write_animations
 from .blendshapes import write_blend_shapes
@@ -61,6 +61,8 @@ def document_from_scene(
         warnings.warn("FBX has no environment (dome) light; it is written as an empty node (USD keeps it)")
     if scene.collections:
         warnings.warn("collections aren't written to FBX yet (USD and .blend keep them)")
+    if check_render(scene) is None and scene.render is not None:
+        warnings.warn("render: FBX keeps the resolution on cameras and the scene has none; it isn't written")
     scene = prepare(scene, unmirror_joints=unmirror_joints, split_inbetweens=split_inbetweens)
     doc = FBXDocument(version=version, global_settings=write_global_settings(scene))
     geometries: dict[int, FBXObject] = {}  # id(Mesh) -> Geometry, so shared meshes are written once
@@ -91,7 +93,7 @@ def document_from_scene(
         model.props_index = 1  # after Version, as Blender writes it
         doc.connect(model, parent_id)
         if node.camera is not None:
-            attributes[node] = write_camera(doc, node)
+            attributes[node] = write_camera(doc, node, scene.render)
             doc.connect(attributes[node], model)
         if node.light is not None and node.light.type != "dome":
             attributes[node] = write_light(doc, node)
