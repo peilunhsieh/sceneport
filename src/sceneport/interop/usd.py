@@ -11,7 +11,8 @@ every UV primvar keeps its original name in customData.
 Blend shapes: each shape is a BlendShape prim under the Mesh (in-betweens
 included), bound with SkelBindingAPI. The default weights live in a
 SkelAnimation: on the mesh's skeleton if it is skinned, else on a jointless
-Skeleton under a SkelRoot made from the mesh's node.
+Skeleton under a SkelRoot made from the mesh's node. USD has no weight range, so
+a range other than the default (0, 1) is kept in the BlendShape prim's customData.
 
 Skeletons: USD joints are not prims. Each tree of joint Nodes becomes a Skeleton
 prim (named after its root joint, where that joint would be), with joints listed
@@ -93,6 +94,7 @@ NAME_KEY = "sceneport:name"  # customData: a primvar's original name
 GROUP_NAMESPACE = "group:"  # primvars:group:<name>, a mesh's vertex groups (per-vertex float weights)
 JOINT_KEY = "sceneport:joint"  # customData: joint token an attachment hangs from
 GENERATED_KEY = "sceneport:generated"  # customData: a prim added only for USD's sake (dropped on load)
+RANGE_KEY = "sceneport:range"  # customData of a BlendShape prim: its (min, max) weight, if not (0, 1)
 BLENDER_GENERATED_KEY = "Blender:generated"  # Blender's tag for its exporter's /root (dropped on load too)
 JOINT_OP = "sceneportJoint"  # xformOp suffix placing an attachment at its joint
 ACTIVE_CLIP_KEY = "sceneport:activeClip"  # root layer customLayerData: name of the clip on the timeline
@@ -1193,6 +1195,8 @@ def _write_blend_shape_targets(stage: Usd.Stage, usd_mesh: UsdGeom.Mesh, mesh: M
     for token, shape in zip(tokens, mesh.blend_shapes):
         usd_shape = UsdSkel.BlendShape.Define(stage, usd_mesh.GetPath().AppendChild(token))
         _set_display_name(usd_shape.GetPrim(), shape.name)
+        if tuple(shape.range) != (0.0, 1.0):
+            usd_shape.GetPrim().SetCustomDataByKey(RANGE_KEY, Gf.Vec2d(*(float(v) for v in shape.range)))
         usd_shape.CreateOffsetsAttr(_vec3f(shape.offsets))
         if shape.indices is not None:
             usd_shape.CreatePointIndicesAttr(Vt.IntArray.FromNumpy(np.ascontiguousarray(shape.indices, np.int32)))
@@ -1820,6 +1824,7 @@ def _read_blend_shapes(prim: Usd.Prim, n_vertices: int) -> list[BlendShape]:
             Inbetween(i.GetWeight(), _array(i.GetOffsets(), np.float64), _optional_vec3(i.GetNormalOffsets()))
             for i in usd_shape.GetInbetweens()
         ]
+        weight_range = usd_shape.GetPrim().GetCustomDataByKey(RANGE_KEY)
         shapes.append(BlendShape(
             usd_shape.GetPrim().GetDisplayName() or str(token),
             _array(usd_shape.GetOffsetsAttr().Get(_TIME), np.float64),
@@ -1827,6 +1832,7 @@ def _read_blend_shapes(prim: Usd.Prim, n_vertices: int) -> list[BlendShape]:
             normal_offsets=_optional_vec3(usd_shape.GetNormalOffsetsAttr().Get(_TIME)),
             weight=float(weights.get(token, 0.0)),
             inbetweens=inbetweens,
+            range=(0.0, 1.0) if weight_range is None else (float(weight_range[0]), float(weight_range[1])),
         ))  # fmt: skip
     return shapes
 

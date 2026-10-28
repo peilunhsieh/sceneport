@@ -213,6 +213,17 @@ def test_usd_roundtrip(tmp_path):
     assert_blend_shapes_close(mesh.blend_shapes, back.meshes[0].blend_shapes, rtol=1e-6)
 
 
+def test_usd_range_roundtrip(tmp_path):
+    """USD has no weight range: one other than (0, 1) is kept in customData, the default isn't written."""
+    mesh = shaped_mesh()
+    mesh.blend_shapes[0].range = (-3.0, 3.0)
+    sceneport.save(Scene(nodes=[Node("Face", mesh=mesh)]), tmp_path / "face.usda")
+    stage = Usd.Stage.Open(str(tmp_path / "face.usda"))
+    assert stage.GetPrimAtPath("/Face/Face/Wide").GetCustomDataByKey("sceneport:range") is None
+    back = sceneport.load(tmp_path / "face.usda").meshes[0].blend_shapes
+    assert [s.range for s in back] == [(-3.0, 3.0), (0.0, 1.0)]
+
+
 def test_usd_layout_and_usdskel_evaluation():
     """USD's own skinning evaluation must match Mesh.deformed_vertices, for every instance."""
     mesh = shaped_mesh()
