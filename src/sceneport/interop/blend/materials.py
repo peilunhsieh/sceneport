@@ -48,6 +48,11 @@ WRAP = {"repeat": "REPEAT", "clamp": "EXTEND", "mirror": "MIRROR", "black": "CLI
 COLOR_INPUTS = {"base_color", "emissive", "specular_color"}  # sRGB textures; the rest are data
 
 
+def _uv_map_name(texture: TextureRef) -> str:
+    """The Blender UV map `texture` reads: "" (the mesh's active one) for none or "st", USD's name for the first UV set."""
+    return "" if texture.uv_set in (None, "st") else texture.uv_set
+
+
 class MaterialWriter:
     def __init__(self, blend_dir: Path | None, pack_images: bool = False):
         self.blend_dir = blend_dir
@@ -133,8 +138,8 @@ class MaterialWriter:
         normal_map = self.tree.nodes.new("ShaderNodeNormalMap")
         normal_map.space = "TANGENT"
         normal_map.inputs["Strength"].default_value = pbr.normal_scale
-        if texture.uv_set:
-            normal_map.uv_map = texture.uv_set
+        if uv_set := _uv_map_name(texture):
+            normal_map.uv_map = uv_set
         color = self._image_output(texture, "normal")
         scale, bias = texture.scale[:3], texture.bias[:3]
         if not (np.allclose(scale, 1.0) and np.allclose(bias, 0.0)):  # decoded to -1..1: back to Blender's 0..1
@@ -171,8 +176,9 @@ class MaterialWriter:
         node.image = self._image(texture, "sRGB" if color else "Non-Color")
         node.extension = WRAP.get(texture.wrap[0] or texture.wrap[1] or "repeat", "REPEAT")
         transformed = not (np.allclose(texture.uv_translation, 0.0) and texture.uv_rotation == 0.0 and np.allclose(texture.uv_scale, 1.0))
-        if texture.uv_set or transformed:
-            uv = self._uv_map(texture.uv_set or "")
+        uv_set = _uv_map_name(texture)
+        if uv_set or transformed:
+            uv = self._uv_map(uv_set)
             if transformed:
                 mapping = self.tree.nodes.new("ShaderNodeMapping")
                 mapping.vector_type = "POINT"

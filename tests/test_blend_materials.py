@@ -79,7 +79,9 @@ def effective(summary: dict) -> dict:
         if kind == "ShaderNodeSeparateColor":
             return {**trace(*into[(name, "Color")]), "channel": socket}
         if kind == "ShaderNodeUVMap":
-            return {"uv_map": node["uv_map"]}
+            # The mesh's first UV map, whether named (Blender's USD importer: "st") or not (ours: ""), is the
+            # default one an image reads without a UV Map node.
+            return {} if node["uv_map"] in ("", "st") else {"uv_map": node["uv_map"]}
         if kind == "ShaderNodeMapping":
             m = (value(node, "Location"), value(node, "Rotation"), value(node, "Scale"))
             return {**trace(*into[(name, "Vector")]), "mapping": tuple(tuple(round(x, 4) for x in v) for v in m)}
@@ -132,6 +134,8 @@ def test_materials_match_blenders_usd_import(blender, tmp_path):
         np.testing.assert_array_equal(objects[name]["material_indices"], ref_objects[name]["material_indices"])
     textured = {n["name"]: n for n in ours["materials"]["Textured"]["nodes"]}
     assert all(n["image"][0].startswith("//tex/") for n in textured.values() if n["type"] == "ShaderNodeTexImage")
+    # USD's "st" (the first UV set) reads the mesh's default UV map: no UV Map node names it.
+    assert all(n["uv_map"] == "" for n in textured.values() if n["type"] == "ShaderNodeUVMap")
 
 
 def test_opacity_threshold_is_a_cutout(blender, tmp_path):
